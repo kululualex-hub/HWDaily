@@ -219,7 +219,6 @@ with tab3:
         
         st.markdown("##### 1. 設定搜尋條件 (設定完畢後請點擊下方搜尋按鈕)")
         
-        # 使用 5 個欄位來配置搜尋條件
         col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
         
         with col_s1:
@@ -277,7 +276,7 @@ with tab3:
                 if search_case not in ["(全部)", "(請先選擇廠別)"]:
                     filtered_df = filtered_df[filtered_df['案件'].astype(str).str.strip() == search_case]
                 if search_installer != "(全部)":
-                    filtered_df = filtered_df[filtered_df['安裝人员'].astype(str).str.contains(search_installer) | filtered_df['安裝人員'].astype(str).str.contains(search_installer)]
+                    filtered_df = filtered_df[filtered_df['安裝人員'].astype(str).str.contains(search_installer)]
                 
                 st.session_state.tab3_filtered_df = filtered_df
                 st.session_state.tab3_search_active = True
