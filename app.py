@@ -296,10 +296,28 @@ with tab3:
                 view_cols = ["日期", "廠別", "案件", "機台名稱", "安裝人員", "狀態", "Remark"]
                 view_cols = [col for col in view_cols if col in filtered_df.columns]
                 
-                # 加入 Excel 匯出按鈕區塊
+                # 產生支援自動換行格式的 Excel 檔案
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                     filtered_df[view_cols].to_excel(writer, sheet_name='裝機搜尋結果', index=False)
+                    
+                    # 取得 xlsxwriter 活頁簿與工作表物件，設定 Remark 欄位自動換行與適當欄寬
+                    workbook = writer.book
+                    worksheet_excel = writer.sheets['裝機搜尋結果']
+                    
+                    # 建立自動換行的樣式
+                    wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top'})
+                    
+                    # 尋找 Remark 欄位的索引位置
+                    for idx, col_name in enumerate(view_cols):
+                        if col_name == 'Remark':
+                            # 將 Remark 欄位套用自動換行格式，並設定預設寬度為 45
+                            worksheet_excel.set_column(idx, idx, 45, wrap_format)
+                        else:
+                            # 其他欄位設定適當的預設寬度與靠上對齊
+                            default_format = workbook.add_format({'valign': 'top'})
+                            worksheet_excel.set_column(idx, idx, 18, default_format)
+                            
                 buffer.seek(0)
                 
                 st.download_button(
