@@ -215,9 +215,12 @@ with tab3:
         df_search['Sheet_Row'] = df_search.index + 2
         
         unique_plants = ["(全部)"] + sorted(list(set([str(x).strip() for x in df_search['廠別'] if str(x).strip()])))
+        unique_installers = ["(全部)"] + installers_list
         
         st.markdown("##### 1. 設定搜尋條件 (設定完畢後請點擊下方搜尋按鈕)")
-        col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+        
+        # 使用 5 個欄位來配置搜尋條件
+        col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
         
         with col_s1:
             date_range = st.date_input("選擇日期區間:", [])
@@ -250,6 +253,9 @@ with tab3:
             
         with col_s4:
             search_case = st.selectbox("案件 (廠別確定後解鎖):", unique_cases, disabled=is_case_disabled)
+
+        with col_s5:
+            search_installer = st.selectbox("安裝人員:", unique_installers)
             
         if st.button("🔍 開始搜尋", type="primary", key="btn_execute_search"):
             with st.spinner("搜尋中..."):
@@ -270,6 +276,8 @@ with tab3:
                     filtered_df = filtered_df[filtered_df['機台名稱'].astype(str).str.strip() == search_machine]
                 if search_case not in ["(全部)", "(請先選擇廠別)"]:
                     filtered_df = filtered_df[filtered_df['案件'].astype(str).str.strip() == search_case]
+                if search_installer != "(全部)":
+                    filtered_df = filtered_df[filtered_df['安裝人员'].astype(str).str.contains(search_installer) | filtered_df['安裝人員'].astype(str).str.contains(search_installer)]
                 
                 st.session_state.tab3_filtered_df = filtered_df
                 st.session_state.tab3_search_active = True
@@ -398,13 +406,10 @@ with tab4:
             st.divider()
             
             st.markdown("#### ✏️ 更新機台狀態")
-            
-            # 建立選項列表（僅存放 Sheet_Row 作為值）
             options = pending_df['Sheet_Row'].tolist()
             
             upd_col1, upd_col2 = st.columns([2, 1])
             with upd_col1:
-                # 使用 format_func 讓下拉選單完美顯示「日期 | 廠別 - 機台名稱 (目前: 狀態)」，同時畫面絕對不出現 Row
                 selected_item_row = st.selectbox(
                     "選擇要更新的機台：", 
                     options, 
