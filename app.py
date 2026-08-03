@@ -8,7 +8,7 @@ import io
 # ==================== 1. 網頁基本與連線設定 ====================
 st.set_page_config(page_title="裝機進度日報表系統", layout="wide")
 
-# 🔒 在這裡設定你的專屬編輯密碼
+# 🔒 在這裡設定你的專屬編輯密碼 (用來解鎖「修改」與「更新狀態」功能)
 EDIT_PASSWORD = "8257"
 
 # 初始化 Session State (記憶按鈕操作與暫存資料)
@@ -59,8 +59,8 @@ worksheet = get_sheet()
 with st.sidebar:
     st.header("🔐 權限管理")
     if not st.session_state.authenticated:
-        st.info("👁️ 目前為「唯讀模式」，可自由查詢與匯出，無法修改資料。")
-        pwd = st.text_input("輸入密碼解鎖新增/修改權限:", type="password")
+        st.info("👁️ 目前可自由查詢、匯出與「新增紀錄」。若需修改/更新既有資料，請輸入密碼解鎖。")
+        pwd = st.text_input("輸入密碼解鎖修改權限:", type="password")
         if st.button("解鎖", type="primary", use_container_width=True):
             if pwd == EDIT_PASSWORD:
                 st.session_state.authenticated = True
@@ -69,7 +69,7 @@ with st.sidebar:
             else:
                 st.error("密碼錯誤！")
     else:
-        st.success("🔓 編輯模式已解鎖，您現在可以新增與修改資料。")
+        st.success("🔓 編輯模式已解鎖，您現在可以修改與更新資料。")
         if st.button("鎖定 (恢復唯讀)", use_container_width=True):
             st.session_state.authenticated = False
             # 鎖定時一併把編輯模式關閉，避免卡在編輯畫面
@@ -176,64 +176,61 @@ with tab1:
         else:
             st.info(f"📅 該日尚無裝機紀錄。")
 
-# ==================== 分頁 2：新增裝機紀錄 (需解鎖) ====================
+# ==================== 分頁 2：新增裝機紀錄 (完全開放，免密碼) ====================
 with tab2:
     st.subheader("填寫裝機資訊")
     
-    if not st.session_state.authenticated:
-        st.warning("⚠️ 目前為「唯讀模式」。請先於左側欄位輸入密碼解鎖，才能填寫與新增紀錄。")
-    else:
-        k_suffix = st.session_state.add_form_key
+    k_suffix = st.session_state.add_form_key
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        input_date = st.date_input("裝機日期", datetime.now(), key=f"add_date_{k_suffix}")
+        plant = st.text_input("廠別:", key=f"add_plant_{k_suffix}")
+        case = st.text_input("案件:", key=f"add_case_{k_suffix}")
+        machine = st.text_input("機台名稱:", key=f"add_machine_{k_suffix}")
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            input_date = st.date_input("裝機日期", datetime.now(), key=f"add_date_{k_suffix}")
-            plant = st.text_input("廠別:", key=f"add_plant_{k_suffix}")
-            case = st.text_input("案件:", key=f"add_case_{k_suffix}")
-            machine = st.text_input("機台名稱:", key=f"add_machine_{k_suffix}")
-            
-        with col2:
-            status = st.selectbox("狀態:", ["未完成", "缺料", "已完成"], key=f"add_status_{k_suffix}")
-            installers = st.multiselect("安裝人員 (可複選):", installers_list, key=f"add_installers_{k_suffix}")
-            remark = st.text_area("Remark (備忘):", height=130, key=f"add_remark_{k_suffix}")
+    with col2:
+        status = st.selectbox("狀態:", ["未完成", "缺料", "已完成"], key=f"add_status_{k_suffix}")
+        installers = st.multiselect("安裝人員 (可複選):", installers_list, key=f"add_installers_{k_suffix}")
+        remark = st.text_area("Remark (備忘):", height=130, key=f"add_remark_{k_suffix}")
 
-        b_col1, b_col2 = st.columns(2)
-        with b_col1:
-            btn_submit = st.button("💾 新增紀錄", type="primary", key="btn_add")
-        with b_col2:
-            btn_clear = st.button("🗑️ 清空欄位", key="btn_clear_form")
+    b_col1, b_col2 = st.columns(2)
+    with b_col1:
+        btn_submit = st.button("💾 新增紀錄", type="primary", key="btn_add")
+    with b_col2:
+        btn_clear = st.button("🗑️ 清空欄位", key="btn_clear_form")
 
-        if btn_clear:
-            st.session_state.add_form_key += 1
-            st.rerun()
+    if btn_clear:
+        st.session_state.add_form_key += 1
+        st.rerun()
 
-        if btn_submit:
-            if not plant or not machine:
-                st.error("「廠別」與「機台名稱」為必填欄位！")
-            else:
-                with st.spinner('寫入雲端中...'):
-                    installer_str = "\n".join(installers)
-                    date_str = input_date.strftime("%Y-%m-%d")
-                    
-                    headers = worksheet.row_values(1)
-                    new_row = [""] * len(headers)
-                    
-                    def fill_col(col_name, val):
-                        if col_name in headers:
-                            idx = headers.index(col_name)
-                            new_row[idx] = val
+    if btn_submit:
+        if not plant or not machine:
+            st.error("「廠別」與「機台名稱」為必填欄位！")
+        else:
+            with st.spinner('寫入雲端中...'):
+                installer_str = "\n".join(installers)
+                date_str = input_date.strftime("%Y-%m-%d")
+                
+                headers = worksheet.row_values(1)
+                new_row = [""] * len(headers)
+                
+                def fill_col(col_name, val):
+                    if col_name in headers:
+                        idx = headers.index(col_name)
+                        new_row[idx] = val
 
-                    fill_col("日期", date_str)
-                    fill_col("安裝人員", installer_str)
-                    fill_col("廠別", plant)
-                    fill_col("案件", case)
-                    fill_col("機台名稱", machine)
-                    fill_col("狀態", status)
-                    fill_col("Remark", remark)
-                    
-                    worksheet.append_row(new_row)
-                    st.success(f"✅ 成功將機台【{machine}】新增至雲端！")
+                fill_col("日期", date_str)
+                fill_col("安裝人員", installer_str)
+                fill_col("廠別", plant)
+                fill_col("案件", case)
+                fill_col("機台名稱", machine)
+                fill_col("狀態", status)
+                fill_col("Remark", remark)
+                
+                worksheet.append_row(new_row)
+                st.success(f"✅ 成功將機台【{machine}】新增至雲端！")
 
 # ==================== 分頁 3：歷史紀錄搜尋與修改 (開放搜尋，修改需解鎖) ====================
 with tab3:
