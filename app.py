@@ -287,8 +287,10 @@ with tab3:
         st.divider()
         
         if st.session_state.tab3_search_active:
-            st.markdown("##### 2. 搜尋結果")
             filtered_df = st.session_state.tab3_filtered_df
+            
+            # 加入搜尋結果總筆數的標題顯示
+            st.markdown(f"##### 2. 搜尋結果 (共計 <span style='color:red;'>{len(filtered_df)}</span> 筆)", unsafe_allow_html=True)
             
             if not filtered_df.empty:
                 display_cols = ["日期", "廠別", "案件", "機台名稱", "安裝人員", "狀態", "Remark", "Sheet_Row"]
