@@ -135,6 +135,7 @@ with tab1:
             
             event = st.dataframe(
                 filtered_df[display_cols], 
+                hide_index=True,
                 use_container_width=True, 
                 on_select="rerun", 
                 selection_mode="single-row",
@@ -383,6 +384,7 @@ with tab4:
             
             event = st.dataframe(
                 pending_df[display_cols], 
+                hide_index=True,
                 use_container_width=True,
                 on_select="rerun",
                 selection_mode="single-row",
@@ -396,7 +398,6 @@ with tab4:
             st.divider()
             
             st.markdown("#### ✏️ 更新機台狀態")
-            # 修改處：將「列 幾 |」改為「日期 |」，並在後面夾帶隱藏的 Sheet_Row 以供後端辨識
             options = pending_df.apply(
                 lambda x: f"{x['日期']} | {x['廠別']} - {x['機台名稱']} (目前: {x['狀態']}) [Row:{x['Sheet_Row']}]", 
                 axis=1
@@ -410,7 +411,6 @@ with tab4:
                 
             if st.button("送出狀態更新", type="primary", key="btn_update"):
                 with st.spinner("同步至雲端中..."):
-                    # 從被選取的項目中解析出實際的 Row 索引
                     row_idx = int(selected_item.split("[Row:")[1].replace("]", ""))
                     
                     headers = worksheet.row_values(1)
