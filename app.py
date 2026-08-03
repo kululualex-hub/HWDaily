@@ -2,6 +2,7 @@ import streamlit as st
 import gspread
 import pandas as pd
 from datetime import datetime
+import json
 
 # ==================== 1. 網頁基本與連線設定 ====================
 st.set_page_config(page_title="裝機進度日報表系統", layout="wide")
@@ -31,7 +32,13 @@ if 'tab4_grid_key' not in st.session_state:
 
 @st.cache_resource
 def get_sheet():
-    gc = gspread.service_account(filename='credentials.json')
+    # 智慧判斷環境：如果在雲端則讀取 st.secrets，若在本機則讀取 credentials.json 檔案
+    if "gcp_service_account" in st.secrets:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        gc = gspread.service_account_from_dict(creds_dict)
+    else:
+        gc = gspread.service_account(filename='credentials.json')
+        
     sh = gc.open("control table")
     return sh.worksheet("裝機人員進廠時間")
 
