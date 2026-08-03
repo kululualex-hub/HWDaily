@@ -8,7 +8,13 @@ import io
 # ==================== 1. 網頁基本與連線設定 ====================
 st.set_page_config(page_title="裝機進度日報表系統", layout="wide")
 
+# 🔒 在這裡設定你的專屬編輯密碼
+EDIT_PASSWORD = "1234"
+
 # 初始化 Session State (記憶按鈕操作與暫存資料)
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+    
 if 'tab1_search_active' not in st.session_state:
     st.session_state.tab1_search_active = False
 if 'tab1_filtered_df' not in st.session_state:
@@ -49,9 +55,31 @@ def get_sheet():
 
 worksheet = get_sheet()
 
+# ==================== 2. 側邊欄：權限解鎖功能 ====================
+with st.sidebar:
+    st.header("🔐 權限管理")
+    if not st.session_state.authenticated:
+        st.info("👁️ 目前為「唯讀模式」，可自由查詢與匯出，無法修改資料。")
+        pwd = st.text_input("輸入密碼解鎖新增/修改權限:", type="password")
+        if st.button("解鎖", type="primary", use_container_width=True):
+            if pwd == EDIT_PASSWORD:
+                st.session_state.authenticated = True
+                st.success("解鎖成功！")
+                st.rerun()
+            else:
+                st.error("密碼錯誤！")
+    else:
+        st.success("🔓 編輯模式已解鎖，您現在可以新增與修改資料。")
+        if st.button("鎖定 (恢復唯讀)", use_container_width=True):
+            st.session_state.authenticated = False
+            # 鎖定時一併把編輯模式關閉，避免卡在編輯畫面
+            st.session_state.tab3_edit_requested = False 
+            st.session_state.tab3_edit_confirmed = False
+            st.rerun()
+
 st.title("📊 裝機進度日報表系統 (Web 雲端版)")
 
-# ==================== 2. 彈出視窗功能 (Dialog) ====================
+# ==================== 3. 彈出視窗功能 (Dialog) ====================
 @st.dialog("📝 詳細資料檢視")
 def show_details_dialog(row_data, reset_key):
     # 透過 CSS 強制隱藏彈出視窗右上角的原生 X 按鈕
@@ -90,7 +118,7 @@ def show_details_dialog(row_data, reset_key):
         st.session_state[reset_key] += 1  
         st.rerun()
 
-# ==================== 3. 建立四大功能分頁 ====================
+# ==================== 4. 建立四大功能分頁 ====================
 installers_list = [
     "鍾博宇", "黃政欽", "張智偉", "林嬴燦", "吳建華", "何乙霆"
 ]
@@ -102,7 +130,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📌 待追蹤清單 (更新狀態)"
 ])
 
-# ==================== 分頁 1：晨會當日動態 ====================
+# ==================== 分頁 1：晨會當日動態 (完全開放) ====================
 with tab1:
     st.subheader("查詢晨會動態")
     target_date = st.date_input("選擇日期", datetime.now(), key="morning_date")
@@ -148,63 +176,66 @@ with tab1:
         else:
             st.info(f"📅 該日尚無裝機紀錄。")
 
-# ==================== 分頁 2：新增裝機紀錄 ====================
+# ==================== 分頁 2：新增裝機紀錄 (需解鎖) ====================
 with tab2:
     st.subheader("填寫裝機資訊")
     
-    k_suffix = st.session_state.add_form_key
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        input_date = st.date_input("裝機日期", datetime.now(), key=f"add_date_{k_suffix}")
-        plant = st.text_input("廠別:", key=f"add_plant_{k_suffix}")
-        case = st.text_input("案件:", key=f"add_case_{k_suffix}")
-        machine = st.text_input("機台名稱:", key=f"add_machine_{k_suffix}")
+    if not st.session_state.authenticated:
+        st.warning("⚠️ 目前為「唯讀模式」。請先於左側欄位輸入密碼解鎖，才能填寫與新增紀錄。")
+    else:
+        k_suffix = st.session_state.add_form_key
         
-    with col2:
-        status = st.selectbox("狀態:", ["未完成", "缺料", "已完成"], key=f"add_status_{k_suffix}")
-        installers = st.multiselect("安裝人員 (可複選):", installers_list, key=f"add_installers_{k_suffix}")
-        remark = st.text_area("Remark (備忘):", height=130, key=f"add_remark_{k_suffix}")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            input_date = st.date_input("裝機日期", datetime.now(), key=f"add_date_{k_suffix}")
+            plant = st.text_input("廠別:", key=f"add_plant_{k_suffix}")
+            case = st.text_input("案件:", key=f"add_case_{k_suffix}")
+            machine = st.text_input("機台名稱:", key=f"add_machine_{k_suffix}")
+            
+        with col2:
+            status = st.selectbox("狀態:", ["未完成", "缺料", "已完成"], key=f"add_status_{k_suffix}")
+            installers = st.multiselect("安裝人員 (可複選):", installers_list, key=f"add_installers_{k_suffix}")
+            remark = st.text_area("Remark (備忘):", height=130, key=f"add_remark_{k_suffix}")
 
-    b_col1, b_col2 = st.columns(2)
-    with b_col1:
-        btn_submit = st.button("💾 新增紀錄", type="primary", key="btn_add")
-    with b_col2:
-        btn_clear = st.button("🗑️ 清空欄位", key="btn_clear_form")
+        b_col1, b_col2 = st.columns(2)
+        with b_col1:
+            btn_submit = st.button("💾 新增紀錄", type="primary", key="btn_add")
+        with b_col2:
+            btn_clear = st.button("🗑️ 清空欄位", key="btn_clear_form")
 
-    if btn_clear:
-        st.session_state.add_form_key += 1
-        st.rerun()
+        if btn_clear:
+            st.session_state.add_form_key += 1
+            st.rerun()
 
-    if btn_submit:
-        if not plant or not machine:
-            st.error("「廠別」與「機台名稱」為必填欄位！")
-        else:
-            with st.spinner('寫入雲端中...'):
-                installer_str = "\n".join(installers)
-                date_str = input_date.strftime("%Y-%m-%d")
-                
-                headers = worksheet.row_values(1)
-                new_row = [""] * len(headers)
-                
-                def fill_col(col_name, val):
-                    if col_name in headers:
-                        idx = headers.index(col_name)
-                        new_row[idx] = val
+        if btn_submit:
+            if not plant or not machine:
+                st.error("「廠別」與「機台名稱」為必填欄位！")
+            else:
+                with st.spinner('寫入雲端中...'):
+                    installer_str = "\n".join(installers)
+                    date_str = input_date.strftime("%Y-%m-%d")
+                    
+                    headers = worksheet.row_values(1)
+                    new_row = [""] * len(headers)
+                    
+                    def fill_col(col_name, val):
+                        if col_name in headers:
+                            idx = headers.index(col_name)
+                            new_row[idx] = val
 
-                fill_col("日期", date_str)
-                fill_col("安裝人員", installer_str)
-                fill_col("廠別", plant)
-                fill_col("案件", case)
-                fill_col("機台名稱", machine)
-                fill_col("狀態", status)
-                fill_col("Remark", remark)
-                
-                worksheet.append_row(new_row)
-                st.success(f"✅ 成功將機台【{machine}】新增至雲端！")
+                    fill_col("日期", date_str)
+                    fill_col("安裝人員", installer_str)
+                    fill_col("廠別", plant)
+                    fill_col("案件", case)
+                    fill_col("機台名稱", machine)
+                    fill_col("狀態", status)
+                    fill_col("Remark", remark)
+                    
+                    worksheet.append_row(new_row)
+                    st.success(f"✅ 成功將機台【{machine}】新增至雲端！")
 
-# ==================== 分頁 3：歷史紀錄搜尋與修改 ====================
+# ==================== 分頁 3：歷史紀錄搜尋與修改 (開放搜尋，修改需解鎖) ====================
 with tab3:
     st.subheader("🔍 進階條件篩選與修改")
     
@@ -296,21 +327,17 @@ with tab3:
                 view_cols = ["日期", "廠別", "案件", "機台名稱", "安裝人員", "狀態", "Remark"]
                 view_cols = [col for col in view_cols if col in filtered_df.columns]
                 
-                # 產生 Excel 檔案（同時對「安裝人員」與「Remark」套用自動換行格式）
+                # 產生 Excel 檔案
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                     filtered_df[view_cols].to_excel(writer, sheet_name='裝機搜尋結果', index=False)
-                    
                     workbook = writer.book
                     worksheet_excel = writer.sheets['裝機搜尋結果']
-                    
-                    # 建立自動換行樣式
                     wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top'})
                     default_format = workbook.add_format({'valign': 'top'})
                     
                     for idx, col_name in enumerate(view_cols):
                         if col_name in ['Remark', '安裝人員']:
-                            # 將 Remark 與安裝人員欄位套用自動換行與適當寬度
                             width = 45 if col_name == 'Remark' else 20
                             worksheet_excel.set_column(idx, idx, width, wrap_format)
                         else:
@@ -341,9 +368,13 @@ with tab3:
                         show_details_dialog(filtered_df.iloc[selected_idx], 'tab3_grid_key')
                     
                     if not st.session_state.tab3_edit_requested:
-                        if st.button("✏️ 開啟修改模式"):
-                            st.session_state.tab3_edit_requested = True
-                            st.rerun()
+                        # 權限控管：只有解鎖狀態才顯示修改按鈕
+                        if st.session_state.authenticated:
+                            if st.button("✏️ 開啟修改模式"):
+                                st.session_state.tab3_edit_requested = True
+                                st.rerun()
+                        else:
+                            st.info("💡 若需在網頁上直接修改資料，請先於左側欄位輸入密碼解鎖。")
                     else:
                         st.warning("⚠️ 即將進入修改，請確認")
                         c1, c2, c3 = st.columns([1, 1, 4])
@@ -396,7 +427,7 @@ with tab3:
     else:
         st.info("試算表中尚無資料。")
 
-# ==================== 分頁 4：待追蹤清單與狀態更新 ====================
+# ==================== 分頁 4：待追蹤清單與狀態更新 (開放觀看，更新需解鎖) ====================
 with tab4:
     st.subheader("📌 待追蹤機台與狀態更新")
     
@@ -435,39 +466,44 @@ with tab4:
             st.divider()
             
             st.markdown("#### ✏️ 更新機台狀態")
-            options = pending_df['Sheet_Row'].tolist()
             
-            upd_col1, upd_col2 = st.columns([2, 1])
-            with upd_col1:
-                selected_item_row = st.selectbox(
-                    "選擇要更新的機台：", 
-                    options, 
-                    format_func=lambda r: f"{pending_df.loc[pending_df['Sheet_Row'] == r, '日期'].values[0]} | {pending_df.loc[pending_df['Sheet_Row'] == r, '廠別'].values[0]} - {pending_df.loc[pending_df['Sheet_Row'] == r, '機台名稱'].values[0]} (目前: {pending_df.loc[pending_df['Sheet_Row'] == r, '狀態'].values[0]})"
-                )
-            with upd_col2:
-                new_status = st.selectbox("修改為新狀態：", ["未完成", "缺料", "已完成"], index=2)
+            # 權限控管：未解鎖時隱藏下拉選單與按鈕
+            if not st.session_state.authenticated:
+                st.info("💡 若需更新機台狀態，請先於左側欄位輸入密碼解鎖。")
+            else:
+                options = pending_df['Sheet_Row'].tolist()
                 
-            if st.button("送出狀態更新", type="primary", key="btn_update"):
-                with st.spinner("同步至雲端中..."):
-                    row_idx = int(selected_item_row)
+                upd_col1, upd_col2 = st.columns([2, 1])
+                with upd_col1:
+                    selected_item_row = st.selectbox(
+                        "選擇要更新的機台：", 
+                        options, 
+                        format_func=lambda r: f"{pending_df.loc[pending_df['Sheet_Row'] == r, '日期'].values[0]} | {pending_df.loc[pending_df['Sheet_Row'] == r, '廠別'].values[0]} - {pending_df.loc[pending_df['Sheet_Row'] == r, '機台名稱'].values[0]} (目前: {pending_df.loc[pending_df['Sheet_Row'] == r, '狀態'].values[0]})"
+                    )
+                with upd_col2:
+                    new_status = st.selectbox("修改為新狀態：", ["未完成", "缺料", "已完成"], index=2)
                     
-                    headers = worksheet.row_values(1)
-                    if "狀態" in headers and "Remark" in headers:
-                        status_col_idx = headers.index("狀態") + 1
-                        remark_col_idx = headers.index("Remark") + 1
+                if st.button("送出狀態更新", type="primary", key="btn_update"):
+                    with st.spinner("同步至雲端中..."):
+                        row_idx = int(selected_item_row)
                         
-                        worksheet.update_cell(row_idx, status_col_idx, new_status)
-                        
-                        old_remark = worksheet.cell(row_idx, remark_col_idx).value or ""
-                        today_str = datetime.now().strftime("%Y-%m-%d")
-                        append_text = f"[{today_str} 更新狀態: {new_status}]"
-                        
-                        new_remark = (str(old_remark).strip() + "\n" + append_text).strip()
-                        worksheet.update_cell(row_idx, remark_col_idx, new_remark)
-                        
-                        st.success(f"✅ 更新成功！該機台已標記為「{new_status}」。")
-                        st.rerun()
-                    else:
-                        st.error("試算表中找不到「狀態」或「Remark」欄位，請檢查表頭名稱。")
+                        headers = worksheet.row_values(1)
+                        if "狀態" in headers and "Remark" in headers:
+                            status_col_idx = headers.index("狀態") + 1
+                            remark_col_idx = headers.index("Remark") + 1
+                            
+                            worksheet.update_cell(row_idx, status_col_idx, new_status)
+                            
+                            old_remark = worksheet.cell(row_idx, remark_col_idx).value or ""
+                            today_str = datetime.now().strftime("%Y-%m-%d")
+                            append_text = f"[{today_str} 更新狀態: {new_status}]"
+                            
+                            new_remark = (str(old_remark).strip() + "\n" + append_text).strip()
+                            worksheet.update_cell(row_idx, remark_col_idx, new_remark)
+                            
+                            st.success(f"✅ 更新成功！該機台已標記為「{new_status}」。")
+                            st.rerun()
+                        else:
+                            st.error("試算表中找不到「狀態」或「Remark」欄位，請檢查表頭名稱。")
         else:
             st.success("🎉 太棒了！目前所有機台皆已完工，沒有待追蹤項目。")
