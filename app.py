@@ -398,20 +398,24 @@ with tab4:
             st.divider()
             
             st.markdown("#### ✏️ 更新機台狀態")
-            options = pending_df.apply(
-                lambda x: f"{x['日期']} | {x['廠別']} - {x['機台名稱']} (目前: {x['狀態']}) [Row:{x['Sheet_Row']}]", 
-                axis=1
-            ).tolist()
+            
+            # 建立選項列表（僅存放 Sheet_Row 作為值）
+            options = pending_df['Sheet_Row'].tolist()
             
             upd_col1, upd_col2 = st.columns([2, 1])
             with upd_col1:
-                selected_item = st.selectbox("選擇要更新的機台：", options)
+                # 使用 format_func 讓下拉選單完美顯示「日期 | 廠別 - 機台名稱 (目前: 狀態)」，同時畫面絕對不出現 Row
+                selected_item_row = st.selectbox(
+                    "選擇要更新的機台：", 
+                    options, 
+                    format_func=lambda r: f"{pending_df.loc[pending_df['Sheet_Row'] == r, '日期'].values[0]} | {pending_df.loc[pending_df['Sheet_Row'] == r, '廠別'].values[0]} - {pending_df.loc[pending_df['Sheet_Row'] == r, '機台名稱'].values[0]} (目前: {pending_df.loc[pending_df['Sheet_Row'] == r, '狀態'].values[0]})"
+                )
             with upd_col2:
                 new_status = st.selectbox("修改為新狀態：", ["未完成", "缺料", "已完成"], index=2)
                 
             if st.button("送出狀態更新", type="primary", key="btn_update"):
                 with st.spinner("同步至雲端中..."):
-                    row_idx = int(selected_item.split("[Row:")[1].replace("]", ""))
+                    row_idx = int(selected_item_row)
                     
                     headers = worksheet.row_values(1)
                     if "狀態" in headers and "Remark" in headers:
