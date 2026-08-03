@@ -289,17 +289,17 @@ with tab3:
         if st.session_state.tab3_search_active:
             filtered_df = st.session_state.tab3_filtered_df
             
-            # 加入搜尋結果總筆數的標題顯示
             st.markdown(f"##### 2. 搜尋結果 (共計 <span style='color:red;'>{len(filtered_df)}</span> 筆)", unsafe_allow_html=True)
             
             if not filtered_df.empty:
-                display_cols = ["日期", "廠別", "案件", "機台名稱", "安裝人員", "狀態", "Remark", "Sheet_Row"]
-                display_cols = [col for col in display_cols if col in filtered_df.columns]
+                # 畫面顯示專用的欄位（刻意排除 Sheet_Row，讓使用者完全看不到）
+                view_cols = ["日期", "廠別", "案件", "機台名稱", "安裝人員", "狀態", "Remark"]
+                view_cols = [col for col in view_cols if col in filtered_df.columns]
                 
                 if not st.session_state.tab3_edit_confirmed:
                     st.markdown("🖱️ 提示：點擊任意列可彈出詳細資訊")
                     event = st.dataframe(
-                        filtered_df[display_cols], 
+                        filtered_df[view_cols], 
                         hide_index=True, 
                         use_container_width=True,
                         on_select="rerun",
@@ -329,10 +329,11 @@ with tab3:
                                 st.rerun()
                 else:
                     st.info("✏️ 編輯模式已開啟，請直接在下方表格修改內容。")
+                    
+                    # 編輯模式下也不顯示 Sheet_Row
                     edited_df = st.data_editor(
-                        filtered_df[display_cols],
+                        filtered_df[view_cols],
                         hide_index=True,
-                        disabled=["Sheet_Row"], 
                         use_container_width=True,
                         key="search_editor"
                     )
@@ -341,22 +342,21 @@ with tab3:
                         with st.spinner("正在比對修改並同步更新至雲端..."):
                             changed_rows = []
                             for i in range(len(edited_df)):
-                                orig_row = filtered_df[display_cols].iloc[i]
+                                orig_row = filtered_df[view_cols].iloc[i]
                                 new_row = edited_df.iloc[i]
                                 
-                                for col in display_cols:
+                                for col in view_cols:
                                     if str(orig_row[col]).strip() != str(new_row[col]).strip():
-                                        changed_rows.append(new_row)
+                                        changed_rows.append((filtered_df.iloc[i]['Sheet_Row'], new_row))
                                         break
                                         
                             if changed_rows:
                                 headers = worksheet.row_values(1)
-                                for row_data in changed_rows:
-                                    sheet_idx = int(row_data['Sheet_Row'])
-                                    for col_name in display_cols:
-                                        if col_name != "Sheet_Row" and col_name in headers:
+                                for sheet_idx, row_data in changed_rows:
+                                    for col_name in view_cols:
+                                        if col_name in headers:
                                             col_idx = headers.index(col_name) + 1
-                                            worksheet.update_cell(sheet_idx, col_idx, str(row_data[col_name]))
+                                            worksheet.update_cell(int(sheet_idx), col_idx, str(row_data[col_name]))
                                 st.success(f"✅ 成功更新 {len(changed_rows)} 筆資料至雲端！")
                                 st.session_state.tab3_search_active = False
                                 st.session_state.tab3_edit_confirmed = False
