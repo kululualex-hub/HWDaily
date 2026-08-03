@@ -3,6 +3,7 @@ import gspread
 import pandas as pd
 from datetime import datetime
 import json
+import io
 
 # ==================== 1. 網頁基本與連線設定 ====================
 st.set_page_config(page_title="裝機進度日報表系統", layout="wide")
@@ -292,9 +293,21 @@ with tab3:
             st.markdown(f"##### 2. 搜尋結果 (共計 <span style='color:red;'>{len(filtered_df)}</span> 筆)", unsafe_allow_html=True)
             
             if not filtered_df.empty:
-                # 畫面顯示專用的欄位（刻意排除 Sheet_Row，讓使用者完全看不到）
                 view_cols = ["日期", "廠別", "案件", "機台名稱", "安裝人員", "狀態", "Remark"]
                 view_cols = [col for col in view_cols if col in filtered_df.columns]
+                
+                # 加入 Excel 匯出按鈕區塊
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    filtered_df[view_cols].to_excel(writer, sheet_name='裝機搜尋結果', index=False)
+                buffer.seek(0)
+                
+                st.download_button(
+                    label="📥 匯出搜尋結果為 Excel",
+                    data=buffer,
+                    file_name=f"裝機進度搜尋結果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
                 
                 if not st.session_state.tab3_edit_confirmed:
                     st.markdown("🖱️ 提示：點擊任意列可彈出詳細資訊")
@@ -330,7 +343,6 @@ with tab3:
                 else:
                     st.info("✏️ 編輯模式已開啟，請直接在下方表格修改內容。")
                     
-                    # 編輯模式下也不顯示 Sheet_Row
                     edited_df = st.data_editor(
                         filtered_df[view_cols],
                         hide_index=True,
