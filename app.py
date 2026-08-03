@@ -30,6 +30,10 @@ if 'tab3_grid_key' not in st.session_state:
 if 'tab4_grid_key' not in st.session_state:
     st.session_state.tab4_grid_key = 0
 
+# 用來控制新增分頁欄位清空的計數器
+if 'add_form_key' not in st.session_state:
+    st.session_state.add_form_key = 0
+
 @st.cache_resource
 def get_sheet():
     # 智慧判斷環境：如果在雲端則讀取 st.secrets，若在本機則讀取 credentials.json 檔案
@@ -145,20 +149,37 @@ with tab1:
 # ==================== 分頁 2：新增裝機紀錄 ====================
 with tab2:
     st.subheader("填寫裝機資訊")
+    
+    # 動態產生用來重置輸入欄位的 Key 後綴
+    k_suffix = st.session_state.add_form_key
+    
     col1, col2 = st.columns(2)
     
     with col1:
-        input_date = st.date_input("裝機日期", datetime.now(), key="add_date")
-        plant = st.text_input("廠別:")
-        case = st.text_input("案件:")
-        machine = st.text_input("機台名稱:")
+        input_date = st.date_input("裝機日期", datetime.now(), key=f"add_date_{k_suffix}")
+        plant = st.text_input("廠別:", key=f"add_plant_{k_suffix}")
+        case = st.text_input("案件:", key=f"add_case_{k_suffix}")
+        machine = st.text_input("機台名稱:", key=f"add_machine_{k_suffix}")
         
     with col2:
-        status = st.selectbox("狀態:", ["未完成", "缺料", "已完成"], key="add_status")
-        installers = st.multiselect("安裝人員 (可複選):", installers_list)
-        remark = st.text_area("Remark (備忘):", height=130)
+        status = st.selectbox("狀態:", ["未完成", "缺料", "已完成"], key=f"add_status_{k_suffix}")
+        installers = st.multiselect("安裝人員 (可複選):", installers_list, key=f"add_installers_{k_suffix}")
+        remark = st.text_area("Remark (備忘):", height=130, key=f"add_remark_{k_suffix}")
 
-    if st.button("💾 新增紀錄", type="primary", key="btn_add"):
+    # 把按鈕放在並排的欄位中：一個是新增紀錄，一個是清空欄位
+    b_col1, b_col2 = st.columns(2)
+    with b_col1:
+        btn_submit = st.button("💾 新增紀錄", type="primary", key="btn_add")
+    with b_col2:
+        btn_clear = st.button("🗑️ 清空欄位", key="btn_clear_form")
+
+    # 點擊清空按鈕時的動作
+    if btn_clear:
+        st.session_state.add_form_key += 1
+        st.rerun()
+
+    # 點擊新增紀錄時的動作
+    if btn_submit:
         if not plant or not machine:
             st.error("「廠別」與「機台名稱」為必填欄位！")
         else:
