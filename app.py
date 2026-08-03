@@ -150,7 +150,6 @@ with tab1:
 with tab2:
     st.subheader("填寫裝機資訊")
     
-    # 動態產生用來重置輸入欄位的 Key 後綴
     k_suffix = st.session_state.add_form_key
     
     col1, col2 = st.columns(2)
@@ -166,19 +165,16 @@ with tab2:
         installers = st.multiselect("安裝人員 (可複選):", installers_list, key=f"add_installers_{k_suffix}")
         remark = st.text_area("Remark (備忘):", height=130, key=f"add_remark_{k_suffix}")
 
-    # 把按鈕放在並排的欄位中：一個是新增紀錄，一個是清空欄位
     b_col1, b_col2 = st.columns(2)
     with b_col1:
         btn_submit = st.button("💾 新增紀錄", type="primary", key="btn_add")
     with b_col2:
         btn_clear = st.button("🗑️ 清空欄位", key="btn_clear_form")
 
-    # 點擊清空按鈕時的動作
     if btn_clear:
         st.session_state.add_form_key += 1
         st.rerun()
 
-    # 點擊新增紀錄時的動作
     if btn_submit:
         if not plant or not machine:
             st.error("「廠別」與「機台名稱」為必填欄位！")
@@ -400,8 +396,9 @@ with tab4:
             st.divider()
             
             st.markdown("#### ✏️ 更新機台狀態")
+            # 修改處：將「列 幾 |」改為「日期 |」，並在後面夾帶隱藏的 Sheet_Row 以供後端辨識
             options = pending_df.apply(
-                lambda x: f"列 {x['Sheet_Row']} | {x['廠別']} - {x['機台名稱']} (目前: {x['狀態']})", 
+                lambda x: f"{x['日期']} | {x['廠別']} - {x['機台名稱']} (目前: {x['狀態']}) [Row:{x['Sheet_Row']}]", 
                 axis=1
             ).tolist()
             
@@ -413,7 +410,8 @@ with tab4:
                 
             if st.button("送出狀態更新", type="primary", key="btn_update"):
                 with st.spinner("同步至雲端中..."):
-                    row_idx = int(selected_item.split(" | ")[0].replace("列 ", ""))
+                    # 從被選取的項目中解析出實際的 Row 索引
+                    row_idx = int(selected_item.split("[Row:")[1].replace("]", ""))
                     
                     headers = worksheet.row_values(1)
                     if "狀態" in headers and "Remark" in headers:
