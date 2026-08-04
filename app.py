@@ -9,7 +9,7 @@ import io
 st.set_page_config(page_title="裝機進度日報表系統", layout="wide")
 
 # 🔒 在這裡設定你的專屬編輯密碼 (用來解鎖「修改」與「更新狀態」功能)
-EDIT_PASSWORD = "1234"
+EDIT_PASSWORD = "8257"
 
 # 初始化 Session State (記憶按鈕操作與暫存資料)
 if 'authenticated' not in st.session_state:
