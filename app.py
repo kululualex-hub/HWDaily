@@ -6,10 +6,10 @@ import json
 import io
 
 # ==================== 1. 網頁基本與連線設定 ====================
-st.set_page_config(page_title="裝機進度日報表系統", layout="wide")
+st.set_page_config(page_title="鴻伍裝機日報系統", layout="wide")
 
 # 🔒 在這裡設定你的專屬編輯密碼 (用來解鎖「修改」與「更新狀態」功能)
-EDIT_PASSWORD = "8257"
+EDIT_PASSWORD = "1234"
 
 # 初始化 Session State (記憶按鈕操作與暫存資料)
 if 'authenticated' not in st.session_state:
@@ -77,7 +77,7 @@ with st.sidebar:
             st.session_state.tab3_edit_confirmed = False
             st.rerun()
 
-st.title("📊 裝機進度日報表系統 (Web 雲端版)")
+st.title("📊 鴻伍裝機日報系統 (Web 雲端版)")
 
 # ==================== 3. 彈出視窗功能 (Dialog) ====================
 @st.dialog("📝 詳細資料檢視")
@@ -345,7 +345,7 @@ with tab3:
                 st.download_button(
                     label="📥 匯出搜尋結果為 Excel",
                     data=buffer,
-                    file_name=f"裝機進度搜尋結果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    file_name=f"鴻伍裝機搜尋結果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 
