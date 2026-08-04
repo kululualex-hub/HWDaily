@@ -9,7 +9,7 @@ import io
 st.set_page_config(page_title="裝機進度日報表系統", layout="wide")
 
 # 🔒 在這裡設定你的專屬編輯密碼 (用來解鎖「修改」與「更新狀態」功能)
-EDIT_PASSWORD = "8257"
+EDIT_PASSWORD = "1234"
 
 # 初始化 Session State (記憶按鈕操作與暫存資料)
 if 'authenticated' not in st.session_state:
@@ -395,7 +395,7 @@ with tab3:
                     )
                     
                     if st.button("💾 儲存表格上的所有修改", type="primary"):
-                        with st.spinner("正在比對修改並同步更新至雲端..."):
+                        with st.spinner("正在批次同步更新至雲端 (請稍候)..."):
                             changed_rows = []
                             for i in range(len(edited_df)):
                                 orig_row = filtered_df[view_cols].iloc[i]
@@ -408,12 +408,20 @@ with tab3:
                                         
                             if changed_rows:
                                 headers = worksheet.row_values(1)
+                                cells_to_update = []
+                                
+                                # 將所有變更包裝成 gspread.Cell 物件清單
                                 for sheet_idx, row_data in changed_rows:
                                     for col_name in view_cols:
                                         if col_name in headers:
                                             col_idx = headers.index(col_name) + 1
-                                            worksheet.update_cell(int(sheet_idx), col_idx, str(row_data[col_name]))
-                                st.success(f"✅ 成功更新 {len(changed_rows)} 筆資料至雲端！")
+                                            cells_to_update.append(gspread.Cell(int(sheet_idx), col_idx, str(row_data[col_name])))
+                                
+                                # 使用 update_cells 進行單次批次更新，避免觸發 API 流量限制
+                                if cells_to_update:
+                                    worksheet.update_cells(cells_to_update)
+                                    
+                                st.success(f"✅ 成功批次更新 {len(changed_rows)} 筆資料至雲端！")
                                 st.session_state.tab3_search_active = False
                                 st.session_state.tab3_edit_confirmed = False
                                 st.rerun()
