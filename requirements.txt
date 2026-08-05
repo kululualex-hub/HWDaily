@@ -1,4 +1,5 @@
-﻿streamlit
+streamlit
 gspread
 pandas
 xlsxwriter
+starlette==0.41.3
