@@ -8,12 +8,11 @@ import io
 # ==================== 1. 網頁基本與連線設定 ====================
 st.set_page_config(page_title="鴻伍裝機日報系統", layout="wide")
 
-# 🔒 在這裡設定你的專屬編輯密碼 (用來解鎖「修改」與「更新狀態」功能)
-EDIT_PASSWORD = "1234"
-
 # 初始化 Session State (記憶按鈕操作與暫存資料)
-if 'authenticated' not in st.session_state:
-    st.session_state.authenticated = False
+if 'user_role' not in st.session_state:
+    st.session_state.user_role = "未登入"  # 可選: 管理者, RD, 業務, 工程師, 公用, 未登入
+if 'user_name' not in st.session_state:
+    st.session_state.user_name = "訪客"
     
 if 'tab1_search_active' not in st.session_state:
     st.session_state.tab1_search_active = False
@@ -42,7 +41,7 @@ if 'add_form_key' not in st.session_state:
     st.session_state.add_form_key = 0
 
 @st.cache_resource
-def get_sheet():
+def get_sheets():
     # 智慧判斷環境：如果在雲端則讀取 st.secrets，若在本機則讀取 credentials.json 檔案
     if "gcp_service_account" in st.secrets:
         creds_dict = dict(st.secrets["gcp_service_account"])
@@ -51,29 +50,92 @@ def get_sheet():
         gc = gspread.service_account(filename='credentials.json')
         
     sh = gc.open("control table")
-    return sh.worksheet("裝機人員進廠時間")
+    worksheet_main = sh.worksheet("裝機人員進廠時間")
+    
+    # 嘗試取得或自動建立「修改紀錄」分頁
+    try:
+        worksheet_log = sh.worksheet("修改紀錄")
+    except:
+        worksheet_log = sh.add_worksheet(title="修改紀錄", rows=1000, cols=10)
+        worksheet_log.append_row(["修改時間", "更改人員", "修改項目", "修改內容"])
+        
+    # 嘗試取得「帳號管理」分頁
+    try:
+        worksheet_accounts = sh.worksheet("帳號管理")
+    except:
+        worksheet_accounts = None
+        
+    return worksheet_main, worksheet_log, worksheet_accounts
 
-worksheet = get_sheet()
+worksheet, worksheet_log, worksheet_accounts = get_sheets()
 
-# ==================== 2. 側邊欄：權限解鎖功能 ====================
+# 記錄異動到「修改紀錄」分頁的輔助函式
+def log_modification(editor_name, item_name, details):
+    try:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        worksheet_log.append_row([now_str, editor_name, item_name, details])
+    except Exception as e:
+        st.error(f"寫入修改紀錄失敗: {e}")
+
+# ==================== 2. 側邊欄：多重身分與訪客登入管理 ====================
 with st.sidebar:
-    st.header("🔐 權限管理")
-    if not st.session_state.authenticated:
-        st.info("👁️ 目前可自由查詢、匯出與「新增紀錄」。若需修改/更新既有資料，請輸入密碼解鎖。")
-        pwd = st.text_input("輸入密碼解鎖修改權限:", type="password")
-        if st.button("解鎖", type="primary", use_container_width=True):
-            if pwd == EDIT_PASSWORD:
-                st.session_state.authenticated = True
-                st.success("解鎖成功！")
+    st.header("🔐 身分與權限管理")
+    
+    current_role = st.session_state.user_role
+    
+    if current_role == "未登入":
+        st.info("👋 歡迎！請選擇登入身分或使用訪客快速登入。")
+        
+        # 🚀 訪客快速登入按鈕 (公用訪問權)
+        if st.button("🚀 訪客快速登入 (公用)", type="primary", use_container_width=True):
+            st.session_state.user_role = "公用"
+            st.session_state.user_name = "訪客(公用)"
+            st.success("已以公用身分登入！")
+            st.rerun()
+            
+        st.divider()
+        st.markdown("##### 帳號密碼登入")
+        input_id = st.text_input("帳號 (ID):")
+        input_pwd = st.text_input("密碼:", type="password")
+        
+        if st.button("登入系統", use_container_width=True):
+            success_login = False
+            if worksheet_accounts:
+                try:
+                    acc_data = worksheet_accounts.get_all_records()
+                    for row in acc_data:
+                        r_user = str(row.get("帳號", "")).strip()
+                        r_pass = str(row.get("密碼", "")).strip()
+                        if r_user.lower() == input_id.strip().lower() and r_pass == input_pwd.strip():
+                            st.session_state.user_role = str(row.get("權限", "工程師")).strip()
+                            st.session_state.user_name = str(row.get("姓名", input_id)).strip()
+                            success_login = True
+                            break
+                except Exception as e:
+                    st.error(f"讀取帳號管理分頁失敗: {e}")
+            
+            # 若無設定帳號管理分頁，提供預設管理者密碼防呆 (預設 1234)
+            if not success_login and input_id == "admin" and input_pwd == "1234":
+                st.session_state.user_role = "管理者"
+                st.session_state.user_name = "系統管理員"
+                success_login = True
+                
+            if success_login:
+                st.success(f"登入成功！身分：{st.session_state.user_role}")
                 st.rerun()
             else:
-                st.error("密碼錯誤！")
+                st.error("帳號或密碼錯誤！")
     else:
-        st.success("🔓 編輯模式已解鎖，您現在可以修改與更新資料。")
-        if st.button("鎖定 (恢復唯讀)", use_container_width=True):
-            st.session_state.authenticated = False
-            # 鎖定時一併把編輯模式關閉，避免卡在編輯畫面
-            st.session_state.tab3_edit_requested = False 
+        st.success(f"👤 當前使用者：{st.session_state.user_name}\n\n🛡️ 身分權限：**{current_role}**")
+        if current_role == "管理者":
+            st.markdown("✨ **[管理者權限]** 您擁有本系統完整之查詢、新增、修改與狀態更新權限。")
+        else:
+            st.markdown(f"👁️ **[{current_role}權限]** 您可進行資料查詢、匯出與新增紀錄。修改資料僅限管理者。")
+            
+        if st.button("登出 / 切換身分", use_container_width=True):
+            st.session_state.user_role = "未登入"
+            st.session_state.user_name = "訪客"
+            st.session_state.tab3_edit_requested = False
             st.session_state.tab3_edit_confirmed = False
             st.rerun()
 
@@ -82,7 +144,6 @@ st.title("📊 鴻伍裝機日報系統 (Web 雲端版)")
 # ==================== 3. 彈出視窗功能 (Dialog) ====================
 @st.dialog("📝 詳細資料檢視")
 def show_details_dialog(row_data, reset_key):
-    # 透過 CSS 強制隱藏彈出視窗右上角的原生 X 按鈕
     st.markdown(
         """
         <style>
@@ -113,7 +174,6 @@ def show_details_dialog(row_data, reset_key):
         unsafe_allow_html=True
     )
     
-    # 專屬關閉按鈕，點擊後會清除勾選並關閉視窗
     if st.button("❌ 關閉視窗並取消選取", type="primary", use_container_width=True):
         st.session_state[reset_key] += 1  
         st.rerun()
@@ -176,7 +236,7 @@ with tab1:
         else:
             st.info(f"📅 該日尚無裝機紀錄。")
 
-# ==================== 分頁 2：新增裝機紀錄 (完全開放，免密碼) ====================
+# ==================== 分頁 2：新增裝機紀錄 (開放新增) ====================
 with tab2:
     st.subheader("填寫裝機資訊")
     
@@ -230,9 +290,17 @@ with tab2:
                 fill_col("Remark", remark)
                 
                 worksheet.append_row(new_row)
+                
+                # 記錄到修改紀錄
+                log_modification(
+                    f"{st.session_state.user_name} ({st.session_state.user_role})", 
+                    f"新增機台: {machine} ({plant})", 
+                    f"日期: {date_str}, 狀態: {status}"
+                )
+                
                 st.success(f"✅ 成功將機台【{machine}】新增至雲端！")
 
-# ==================== 分頁 3：歷史紀錄搜尋與修改 (開放搜尋，修改需解鎖) ====================
+# ==================== 分頁 3：歷史紀錄搜尋與修改 (僅管理者可修改) ====================
 with tab3:
     st.subheader("🔍 進階條件篩選與修改")
     
@@ -365,13 +433,13 @@ with tab3:
                         show_details_dialog(filtered_df.iloc[selected_idx], 'tab3_grid_key')
                     
                     if not st.session_state.tab3_edit_requested:
-                        # 權限控管：只有解鎖狀態才顯示修改按鈕
-                        if st.session_state.authenticated:
+                        # 權限控管：只有「管理者」才顯示修改按鈕
+                        if st.session_state.user_role == "管理者":
                             if st.button("✏️ 開啟修改模式"):
                                 st.session_state.tab3_edit_requested = True
                                 st.rerun()
                         else:
-                            st.info("💡 若需在網頁上直接修改資料，請先於左側欄位輸入密碼解鎖。")
+                            st.info("💡 目前身分為唯讀/查詢，若需修改歷史資料，請透過側邊欄切換為「管理者」身分登入。")
                     else:
                         st.warning("⚠️ 即將進入修改，請確認")
                         c1, c2, c3 = st.columns([1, 1, 4])
@@ -410,16 +478,21 @@ with tab3:
                                 headers = worksheet.row_values(1)
                                 cells_to_update = []
                                 
-                                # 將所有變更包裝成 gspread.Cell 物件清單
                                 for sheet_idx, row_data in changed_rows:
                                     for col_name in view_cols:
                                         if col_name in headers:
                                             col_idx = headers.index(col_name) + 1
                                             cells_to_update.append(gspread.Cell(int(sheet_idx), col_idx, str(row_data[col_name])))
                                 
-                                # 使用 update_cells 進行單次批次更新，避免觸發 API 流量限制
                                 if cells_to_update:
                                     worksheet.update_cells(cells_to_update)
+                                    
+                                # 記錄到修改紀錄
+                                log_modification(
+                                    f"{st.session_state.user_name} ({st.session_state.user_role})",
+                                    "批次歷史修改",
+                                    f"更新了 {len(changed_rows)} 筆資料列"
+                                )
                                     
                                 st.success(f"✅ 成功批次更新 {len(changed_rows)} 筆資料至雲端！")
                                 st.session_state.tab3_search_active = False
@@ -432,7 +505,7 @@ with tab3:
     else:
         st.info("試算表中尚無資料。")
 
-# ==================== 分頁 4：待追蹤清單與狀態更新 (開放觀看，更新需解鎖) ====================
+# ==================== 分頁 4：待追蹤清單與狀態更新 (僅管理者可更新) ====================
 with tab4:
     st.subheader("📌 待追蹤機台與狀態更新")
     
@@ -472,9 +545,9 @@ with tab4:
             
             st.markdown("#### ✏️ 更新機台狀態")
             
-            # 權限控管：未解鎖時隱藏下拉選單與按鈕
-            if not st.session_state.authenticated:
-                st.info("💡 若需更新機台狀態，請先於左側欄位輸入密碼解鎖。")
+            # 權限控管：只有「管理者」才能操作狀態更新
+            if st.session_state.user_role != "管理者":
+                st.info("💡 狀態更新功能僅限「管理者」操作。若需更新狀態，請透過側邊欄切換身分登入。")
             else:
                 options = pending_df['Sheet_Row'].tolist()
                 
@@ -497,6 +570,10 @@ with tab4:
                             status_col_idx = headers.index("狀態") + 1
                             remark_col_idx = headers.index("Remark") + 1
                             
+                            # 取得當前機台名稱供日誌紀錄使用
+                            current_machine = worksheet.cell(row_idx, headers.index("機台名稱") + 1).value
+                            current_plant = worksheet.cell(row_idx, headers.index("廠別") + 1).value
+                            
                             worksheet.update_cell(row_idx, status_col_idx, new_status)
                             
                             old_remark = worksheet.cell(row_idx, remark_col_idx).value or ""
@@ -505,6 +582,13 @@ with tab4:
                             
                             new_remark = (str(old_remark).strip() + "\n" + append_text).strip()
                             worksheet.update_cell(row_idx, remark_col_idx, new_remark)
+                            
+                            # 記錄到修改紀錄分頁
+                            log_modification(
+                                f"{st.session_state.user_name} ({st.session_state.user_role})",
+                                f"更新機台狀態: {current_machine} ({current_plant})",
+                                f"狀態變更為: {new_status}"
+                            )
                             
                             st.success(f"✅ 更新成功！該機台已標記為「{new_status}」。")
                             st.rerun()
