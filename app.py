@@ -60,13 +60,13 @@ except gspread.exceptions.WorksheetNotFound as e:
 
 # ==================== 2. 登入系統與權限驗證 ====================
 if not st.session_state.logged_in:
-    # 登入頁面置中呈現 Logo 與標題
-    col_l1, col_l2, col_l3 = st.columns([1, 1.5, 1])
+    # 完美置中排版：左右留白，中間放置 Logo、標題與登入表單
+    col_l1, col_l2, col_l3 = st.columns([1, 1.2, 1])
     with col_l2:
         try:
-            st.image("logo.jpg", width=300) # 顯示 HungWu Logo
+            st.image("logo.jpg", width=320) # 顯示 HungWu Logo
         except:
-            st.warning("⚠️ 找不到 logo.jpg 圖片檔案，請確認是否已上傳至專案資料夾。")
+            st.warning("⚠️ 找不到 logo.jpg 圖片檔案。")
             
         st.markdown("<h2 style='text-align: center; margin-top: 10px;'>鴻伍裝機日報系統</h2>", unsafe_allow_html=True)
         st.markdown("### 🔐 系統登入")
@@ -96,7 +96,7 @@ if not st.session_state.logged_in:
                         else:
                             st.error("帳號或密碼錯誤，請重新輸入。")
                     else:
-                        st.error("『帳號管理』分頁中缺少必要欄位或無資料，請通知系統管理員。")
+                        st.error("『帳號管理』分頁中缺少必要欄位或無資料。")
         
         # 🚀 訪客快速登入按鈕
         if st.button("🚀 訪客快速登入 (公用權限)", use_container_width=True, type="secondary"):
@@ -111,7 +111,7 @@ if not st.session_state.logged_in:
 can_edit = st.session_state.user_role == "管理者"
 can_add = st.session_state.user_role in ["管理者", "工程師", "業務", "RD"]
 
-# 側邊欄狀態 (同步在側邊欄上方顯示 Logo)
+# 側邊欄狀態
 with st.sidebar:
     try:
         st.image("logo.jpg", width=200)
