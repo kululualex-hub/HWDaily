@@ -60,13 +60,17 @@ except gspread.exceptions.WorksheetNotFound as e:
 
 # ==================== 2. 登入系統與權限驗證 ====================
 if not st.session_state.logged_in:
-    # 完美置中排版：利用三欄把內容夾在正中間
     col1, col2, col3 = st.columns([1, 1.2, 1])
     with col2:
-        try:
-            st.image("logo.jpg", width=320) # 顯示 HungWu Logo
-        except:
-            st.warning("⚠️ 找不到 logo.jpg 圖片檔案。")
+        # 🚀 使用純 HTML ＋ Base64 或絕對路徑確保圖片 100% 置中
+        st.markdown(
+            """
+            <div style="display: flex; justify-content: center; margin-bottom: 10px;">
+                <img src="https://raw.githubusercontent.com/kululualex-hub/HWDaily/main/logo.jpg" width="320" style="border-radius: 5px;">
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
             
         st.markdown("<h2 style='text-align: center; margin-top: 10px;'>鴻伍裝機日報系統</h2>", unsafe_allow_html=True)
         st.markdown("### 🔐 系統登入")
