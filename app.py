@@ -60,11 +60,17 @@ except gspread.exceptions.WorksheetNotFound as e:
 
 # ==================== 2. 登入系統與權限驗證 ====================
 if not st.session_state.logged_in:
-    st.markdown("<h1 style='text-align: center; margin-top: 50px;'>📊 鴻伍裝機日報系統</h1>", unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
+    # 登入頁面置中呈現 Logo 與標題
+    col_l1, col_l2, col_l3 = st.columns([1, 1.5, 1])
+    with col_l2:
+        try:
+            st.image("logo.jpg", width=300) # 顯示 HungWu Logo
+        except:
+            st.warning("⚠️ 找不到 logo.jpg 圖片檔案，請確認是否已上傳至專案資料夾。")
+            
+        st.markdown("<h2 style='text-align: center; margin-top: 10px;'>鴻伍裝機日報系統</h2>", unsafe_allow_html=True)
         st.markdown("### 🔐 系統登入")
+        
         with st.form("login_form"):
             user_id = st.text_input("帳號 (ID)")
             user_pwd = st.text_input("密碼", type="password")
@@ -92,7 +98,7 @@ if not st.session_state.logged_in:
                     else:
                         st.error("『帳號管理』分頁中缺少必要欄位或無資料，請通知系統管理員。")
         
-        # 🚀 訪客快速登入按鈕 (具備公用權限，免密碼)
+        # 🚀 訪客快速登入按鈕
         if st.button("🚀 訪客快速登入 (公用權限)", use_container_width=True, type="secondary"):
             st.session_state.logged_in = True
             st.session_state.user_name = "訪客"
@@ -101,13 +107,17 @@ if not st.session_state.logged_in:
 
     st.stop() # 阻擋未登入者往下執行
 
-# 權限定義：區分「可編輯群組(管理者)」與「其他唯讀/新增群組」
-# 依照需求：目前只給「管理者」修改與狀態更新功能
+# 權限定義
 can_edit = st.session_state.user_role == "管理者"
-can_add = st.session_state.user_role in ["管理者", "工程師", "業務", "RD"] # 依需求開放新增或維持特定權限
+can_add = st.session_state.user_role in ["管理者", "工程師", "業務", "RD"]
 
-# 側邊欄狀態
+# 側邊欄狀態 (同步在側邊欄上方顯示 Logo)
 with st.sidebar:
+    try:
+        st.image("logo.jpg", width=200)
+    except:
+        pass
+    st.divider()
     st.header("👤 帳號資訊")
     st.markdown(f"**姓名：** {st.session_state.user_name}")
     st.markdown(f"**權限：** {st.session_state.user_role}")
@@ -157,7 +167,7 @@ installers_list = ["鍾博宇", "黃政欽", "張智偉", "林嬴燦", "吳建�
 
 tab1, tab2, tab3, tab4 = st.tabs(["🌅 晨會當日動態", "📝 新增裝機紀錄", "🔍 歷史搜尋與修改", "📌 待追蹤清單 (更新狀態)"])
 
-# ==================== 分頁 1：晨會當日動態 (全部人可見) ====================
+# ==================== 分頁 1：晨會當日動態 ====================
 with tab1:
     st.subheader("查詢晨會動態")
     target_date = st.date_input("選擇日期", datetime.now(), key="morning_date")
@@ -199,7 +209,7 @@ with tab1:
         else:
             st.info(f"📅 該日尚無裝機紀錄。")
 
-# ==================== 分頁 2：新增裝機紀錄 (公用權限無法新增) ====================
+# ==================== 分頁 2：新增裝機紀錄 ====================
 with tab2:
     st.subheader("填寫裝機資訊")
     
@@ -252,13 +262,12 @@ with tab2:
                     
                     worksheet.append_row(new_row)
                     
-                    # 寫入修改紀錄
                     log_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     ws_log.append_row([log_time, f"{st.session_state.user_name} ({st.session_state.user_role})", f"新增機台: {machine} (廠別:{plant})", "", "建立新紀錄"])
                     
                     st.success(f"✅ 成功將機台【{machine}】新增至雲端！")
 
-# ==================== 分頁 3：歷史紀錄搜尋與修改 (僅管理者可修改) ====================
+# ==================== 分頁 3：歷史紀錄搜尋與修改 ====================
 with tab3:
     st.subheader("🔍 進階條件篩選與修改")
     data = worksheet.get_all_records()
@@ -331,7 +340,6 @@ with tab3:
                 view_cols = ["日期", "廠別", "案件", "機台名稱", "安裝人員", "狀態", "Remark"]
                 view_cols = [col for col in view_cols if col in filtered_df.columns]
                 
-                # Excel 匯出 (全部人皆可匯出)
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                     filtered_df[view_cols].to_excel(writer, sheet_name='裝機搜尋結果', index=False)
@@ -351,7 +359,6 @@ with tab3:
                         show_details_dialog(filtered_df.iloc[event.selection.rows[0]], 'tab3_grid_key')
                     
                     if not st.session_state.tab3_edit_requested:
-                        # 僅限「管理者」開啟修改模式
                         if can_edit:
                             if st.button("✏️ 開啟修改模式"):
                                 st.session_state.tab3_edit_requested = True
@@ -413,7 +420,7 @@ with tab3:
     else:
         st.info("試算表中尚無資料。")
 
-# ==================== 分頁 4：待追蹤清單與狀態更新 (僅管理者可更新) ====================
+# ==================== 分頁 4：待追蹤清單與狀態更新 ====================
 with tab4:
     st.subheader("📌 待追蹤機台與狀態更新")
     data = worksheet.get_all_records()
@@ -436,7 +443,6 @@ with tab4:
             st.divider()
             st.markdown("#### ✏️ 更新機台狀態")
             
-            # 僅限「管理者」進行狀態更新
             if not can_edit:
                 st.info(f"💡 您的權限 ({st.session_state.user_role}) 僅供檢視，狀態更新功能僅限「管理者」操作。")
             else:
