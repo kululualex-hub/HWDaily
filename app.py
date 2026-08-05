@@ -78,7 +78,6 @@ if not st.session_state.logged_in:
                     df_acc = pd.DataFrame(accounts_data)
                     
                     if not df_acc.empty and '帳號' in df_acc.columns and '密碼' in df_acc.columns:
-                        # 轉換為字串比對避免型別錯誤
                         df_acc['帳號'] = df_acc['帳號'].astype(str)
                         df_acc['密碼'] = df_acc['密碼'].astype(str)
                         
@@ -92,11 +91,20 @@ if not st.session_state.logged_in:
                             st.error("帳號或密碼錯誤，請重新輸入。")
                     else:
                         st.error("『帳號管理』分頁中缺少必要欄位或無資料，請通知系統管理員。")
+        
+        # 🚀 訪客快速登入按鈕 (具備公用權限，免密碼)
+        if st.button("🚀 訪客快速登入 (公用權限)", use_container_width=True, type="secondary"):
+            st.session_state.logged_in = True
+            st.session_state.user_name = "訪客"
+            st.session_state.user_role = "公用"
+            st.rerun()
+
     st.stop() # 阻擋未登入者往下執行
 
-# 權限定義：區分「可編輯群組」與「純檢視群組」
-can_edit = st.session_state.user_role in ["管理者", "工程師"]
-can_add = st.session_state.user_role in ["管理者", "工程師"]
+# 權限定義：區分「可編輯群組(管理者)」與「其他唯讀/新增群組」
+# 依照需求：目前只給「管理者」修改與狀態更新功能
+can_edit = st.session_state.user_role == "管理者"
+can_add = st.session_state.user_role in ["管理者", "工程師", "業務", "RD"] # 依需求開放新增或維持特定權限
 
 # 側邊欄狀態
 with st.sidebar:
@@ -191,12 +199,12 @@ with tab1:
         else:
             st.info(f"📅 該日尚無裝機紀錄。")
 
-# ==================== 分頁 2：新增裝機紀錄 (依權限控管) ====================
+# ==================== 分頁 2：新增裝機紀錄 (公用權限無法新增) ====================
 with tab2:
     st.subheader("填寫裝機資訊")
     
-    if not can_add:
-        st.warning(f"⚠️ 您的權限等級 ( {st.session_state.user_role} ) 僅供檢視，無法新增紀錄。")
+    if st.session_state.user_role == "公用":
+        st.warning("⚠️ 目前為「公用」身分，僅供檢視與查詢，無法新增裝機紀錄。")
     else:
         k_suffix = st.session_state.add_form_key
         col1, col2 = st.columns(2)
@@ -246,11 +254,11 @@ with tab2:
                     
                     # 寫入修改紀錄
                     log_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    ws_log.append_row([log_time, st.session_state.user_name, f"新增機台: {machine} (廠別:{plant})", "", "建立新紀錄"])
+                    ws_log.append_row([log_time, f"{st.session_state.user_name} ({st.session_state.user_role})", f"新增機台: {machine} (廠別:{plant})", "", "建立新紀錄"])
                     
                     st.success(f"✅ 成功將機台【{machine}】新增至雲端！")
 
-# ==================== 分頁 3：歷史紀錄搜尋與修改 ====================
+# ==================== 分頁 3：歷史紀錄搜尋與修改 (僅管理者可修改) ====================
 with tab3:
     st.subheader("🔍 進階條件篩選與修改")
     data = worksheet.get_all_records()
@@ -343,12 +351,13 @@ with tab3:
                         show_details_dialog(filtered_df.iloc[event.selection.rows[0]], 'tab3_grid_key')
                     
                     if not st.session_state.tab3_edit_requested:
+                        # 僅限「管理者」開啟修改模式
                         if can_edit:
                             if st.button("✏️ 開啟修改模式"):
                                 st.session_state.tab3_edit_requested = True
                                 st.rerun()
                         else:
-                            st.info(f"💡 您的權限 ({st.session_state.user_role}) 僅供檢視，無法修改資料。")
+                            st.info(f"💡 您的權限 ({st.session_state.user_role}) 僅供查詢與檢視，修改功能僅限「管理者」。")
                     else:
                         st.warning("⚠️ 即將進入修改，請確認")
                         c1, c2, c3 = st.columns([1, 1, 4])
@@ -384,7 +393,7 @@ with tab3:
                                             changed_cells.append(gspread.Cell(int(sheet_row_idx), col_idx, str(new_row[col])))
                                             log_entries.append([
                                                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                                st.session_state.user_name,
+                                                f"{st.session_state.user_name} ({st.session_state.user_role})",
                                                 f"{machine_name} (Row {sheet_row_idx}) - {col}",
                                                 str(orig_row[col]),
                                                 str(new_row[col])
@@ -404,7 +413,7 @@ with tab3:
     else:
         st.info("試算表中尚無資料。")
 
-# ==================== 分頁 4：待追蹤清單與狀態更新 ====================
+# ==================== 分頁 4：待追蹤清單與狀態更新 (僅管理者可更新) ====================
 with tab4:
     st.subheader("📌 待追蹤機台與狀態更新")
     data = worksheet.get_all_records()
@@ -427,8 +436,9 @@ with tab4:
             st.divider()
             st.markdown("#### ✏️ 更新機台狀態")
             
+            # 僅限「管理者」進行狀態更新
             if not can_edit:
-                st.info(f"💡 您的權限 ({st.session_state.user_role}) 僅供檢視，無法進行狀態更新。")
+                st.info(f"💡 您的權限 ({st.session_state.user_role}) 僅供檢視，狀態更新功能僅限「管理者」操作。")
             else:
                 options = pending_df['Sheet_Row'].tolist()
                 upd_col1, upd_col2 = st.columns([2, 1])
@@ -460,7 +470,7 @@ with tab4:
                             worksheet.update_cell(row_idx, remark_col_idx, new_remark)
                             
                             log_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            ws_log.append_row([log_time, st.session_state.user_name, f"更新機台狀態: {target_machine}", old_status, new_status])
+                            ws_log.append_row([log_time, f"{st.session_state.user_name} ({st.session_state.user_role})", f"更新機台狀態: {target_machine}", old_status, new_status])
                             
                             st.success(f"✅ 更新成功！該機台已標記為「{new_status}」。")
                             st.rerun()
