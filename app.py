@@ -55,7 +55,7 @@ def get_sheet():
 
 worksheet = get_sheet()
 
-# ==================== 2. 側邊欄：權限解鎖與訪客登入功能 ====================
+# ==================== 2. 側邊欄：權限解鎖功能 ====================
 with st.sidebar:
     st.header("🔐 權限管理")
     if not st.session_state.authenticated:
@@ -68,15 +68,6 @@ with st.sidebar:
                 st.rerun()
             else:
                 st.error("密碼錯誤！")
-        
-        st.divider()
-        
-        # 🚀 新增的訪客快速登入按鈕 (直接賦予一般操作權限，免密碼)
-        if st.button("🚀 訪客快速登入", use_container_width=True):
-            st.session_state.authenticated = True
-            st.success("已透過訪客身分登入！")
-            st.rerun()
-            
     else:
         st.success("🔓 編輯模式已解鎖，您現在可以修改與更新資料。")
         if st.button("鎖定 (恢復唯讀)", use_container_width=True):
@@ -380,7 +371,7 @@ with tab3:
                                 st.session_state.tab3_edit_requested = True
                                 st.rerun()
                         else:
-                            st.info("💡 若需在網頁上直接修改資料，請先於左側欄位輸入密碼解鎖或使用訪客快速登入。")
+                            st.info("💡 若需在網頁上直接修改資料，請先於左側欄位輸入密碼解鎖。")
                     else:
                         st.warning("⚠️ 即將進入修改，請確認")
                         c1, c2, c3 = st.columns([1, 1, 4])
@@ -483,7 +474,7 @@ with tab4:
             
             # 權限控管：未解鎖時隱藏下拉選單與按鈕
             if not st.session_state.authenticated:
-                st.info("💡 若需更新機台狀態，請先於左側欄位輸入密碼解鎖或使用訪客快速登入。")
+                st.info("💡 若需更新機台狀態，請先於左側欄位輸入密碼解鎖。")
             else:
                 options = pending_df['Sheet_Row'].tolist()
                 
