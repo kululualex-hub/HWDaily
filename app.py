@@ -62,22 +62,28 @@ except gspread.exceptions.WorksheetNotFound as e:
 if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1, 1.2, 1])
     with col2:
-        # 🚀 使用 HTML 配合 margin-left 微調，精準對齊下方文字中心
+        # 🚀 透過自訂 CSS 容器包裹 st.image，利用 margin-left 完美對齊下方文字中心
         st.markdown(
             """
-            <div style="display: flex; justify-content: center; margin-bottom: 5px;">
-                <img src="app/static/logo.jpg" width="320" style="position: relative; left: 22px;" onerror="this.onerror=null; this.src='https://raw.githubusercontent.com/kululualex-hub/HWDaily/main/logo.jpg';">
-            </div>
+            <style>
+            .centered-logo {
+                display: flex;
+                justify-content: center;
+                margin-left: 20px; /* 根據視覺微調向右偏移 */
+                margin-bottom: -10px;
+            }
+            </style>
+            <div class="centered-logo">
             """,
             unsafe_allow_html=True
         )
         
-        # 備用保險渲染 (若上方 HTML 抓不到則由 Streamlit 渲染)
         try:
-            # 這裡我們透過空的 markdown 容器包覆，或者直接由上方 HTML 搞定
-            pass
+            st.image("logo.jpg", width=300)
         except:
-            pass
+            st.warning("⚠️ 找不到 logo.jpg 圖片檔案。")
+            
+        st.markdown("</div>", unsafe_allow_html=True)
             
         st.markdown("<h2 style='text-align: center; margin-top: 5px;'>鴻伍裝機日報系統</h2>", unsafe_allow_html=True)
         st.markdown("### 🔐 系統登入")
