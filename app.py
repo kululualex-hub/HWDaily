@@ -38,26 +38,33 @@ if 'tab4_grid_key' not in st.session_state:
 if 'add_form_key' not in st.session_state:
     st.session_state.add_form_key = 0
 
-@st.cache_resource
-def get_google_client():
-    if "gcp_service_account" in st.secrets:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        return gspread.service_account_from_dict(creds_dict)
-    else:
-        return gspread.service_account(filename='credentials.json')
+# ==================== Google API 連線與快取優化 ====================
+@st.cache_resource(ttl=3600)  # 快取 1 小時，避免頻繁呼叫 Google API 觸發限制
+def init_google_sheets():
+    try:
+        if "gcp_service_account" in st.secrets:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            gc = gspread.service_account_from_dict(creds_dict)
+        else:
+            gc = gspread.service_account(filename='credentials.json')
+        
+        # 將 open 與 worksheet 的動作全部包在快取函數內，只執行一次
+        sheet = gc.open("control table")
+        ws_1 = sheet.worksheet("裝機人員進廠時間")
+        ws_2 = sheet.worksheet("帳號管理")
+        ws_3 = sheet.worksheet("修改紀錄")
+        return sheet, ws_1, ws_2, ws_3
+        
+    except gspread.exceptions.WorksheetNotFound as e:
+        st.error(f"⚠️ 系統錯誤：找不到必要的分頁 ({e})。請確認已建立『裝機人員進廠時間』、『帳號管理』與『修改紀錄』。")
+        st.stop()
+    except Exception as e:
+        st.error(f"⚠️ Google API 連線異常，請稍後再試。詳細錯誤：{e}")
+        st.stop()
 
-gc = get_google_client()
-sh = gc.open("control table")
-
-# 確認必須的分頁是否存在
-try:
-    worksheet = sh.worksheet("裝機人員進廠時間")
-    ws_accounts = sh.worksheet("帳號管理")
-    ws_log = sh.worksheet("修改紀錄")
-except gspread.exceptions.WorksheetNotFound as e:
-    st.error(f"⚠️ 系統錯誤：在 Google 試算表中找不到必要的分頁 ({e})。請確認已建立『裝機人員進廠時間』、『帳號管理』與『修改紀錄』。")
-    st.stop()
-
+# 取得快取後的試算表物件
+sh, worksheet, ws_accounts, ws_log = init_google_sheets()
+# ===================================================================
 # ==================== 2. 登入系統與權限驗證 ====================
 if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1, 1.2, 1])
