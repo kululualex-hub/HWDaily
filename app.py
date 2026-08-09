@@ -64,6 +64,14 @@ if 'dev_reason_dialog_key' not in st.session_state:
     st.session_state.dev_reason_dialog_key = 0
 if 'dev_flash_message' not in st.session_state:
     st.session_state.dev_flash_message = ""
+if 'dev_flash_level' not in st.session_state:
+    st.session_state.dev_flash_level = "success"
+if 'dev_cloud_initialized' not in st.session_state:
+    st.session_state.dev_cloud_initialized = False
+if 'dev_data_dirty' not in st.session_state:
+    st.session_state.dev_data_dirty = False
+if 'dev_pending_sync_message' not in st.session_state:
+    st.session_state.dev_pending_sync_message = ""
 if 'dev_pending_previous_record' not in st.session_state:
     st.session_state.dev_pending_previous_record = None
 if 'dev_identity_draft' not in st.session_state:
@@ -112,7 +120,7 @@ DEV_WORKSHEET_NAME = "開發區測試資料"
 
 
 def sync_dev_data_to_google():
-    """將開發區目前的手動輸入內容，以快照方式同步至獨立工作表。"""
+    """將開發區目前內容以完整快照方式同步至獨立工作表。"""
     headers = [
         "同步批次",
         "紀錄類型",
@@ -128,9 +136,12 @@ def sync_dev_data_to_google():
         "未完成或缺貨原因",
         "Remark",
     ]
-    sync_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sync_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
     operator = f"{st.session_state.user_name} ({st.session_state.user_role})"
-    rows = []
+    rows = [[
+        sync_time, "快照資訊", sync_time, "", operator,
+        "", "", "", "", "", "", "", "",
+    ]]
 
     for plant_name in st.session_state.dev_plant_options:
         rows.append([
@@ -162,9 +173,6 @@ def sync_dev_data_to_google():
             record.get("Remark", ""),
         ])
 
-    if not rows:
-        return 0
-
     try:
         dev_worksheet = sh.worksheet(DEV_WORKSHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
@@ -187,7 +195,7 @@ def sync_dev_data_to_google():
     elif existing_headers != headers:
         raise ValueError(f"「{DEV_WORKSHEET_NAME}」的欄位格式不符，請先確認標題列。")
     dev_worksheet.append_rows(rows, value_input_option="USER_ENTERED")
-    return len(rows)
+    return len(rows) - 1
 
 
 def load_latest_dev_data_from_google():
@@ -271,6 +279,36 @@ def load_latest_dev_data_from_google():
         "案件": len(case_options),
         "測試結果": len(test_records),
     }
+
+
+def queue_dev_auto_sync(message):
+    """標記開發資料已異動，於下一次重跑時自動保存。"""
+    st.session_state.dev_data_dirty = True
+    st.session_state.dev_pending_sync_message = message
+
+
+def auto_sync_pending_dev_data():
+    """自動保存待同步的開發資料；失敗時保留待同步狀態供下次重試。"""
+    if not st.session_state.dev_data_dirty:
+        return True
+
+    action_message = st.session_state.dev_pending_sync_message or "開發資料已更新"
+    try:
+        synced_count = sync_dev_data_to_google()
+        st.session_state.dev_data_dirty = False
+        st.session_state.dev_pending_sync_message = ""
+        st.session_state.dev_flash_level = "success"
+        st.session_state.dev_flash_message = (
+            f"{action_message}，已自動同步至「{DEV_WORKSHEET_NAME}」"
+            f"（目前 {synced_count} 筆資料）。"
+        )
+        return True
+    except Exception as e:
+        st.session_state.dev_flash_level = "error"
+        st.session_state.dev_flash_message = (
+            f"{action_message}，但自動同步失敗；系統會在下次操作時重試。詳細錯誤：{e}"
+        )
+        return False
 
 # ===================================================================
 # ==================== 2. 登入系統與權限驗證 ====================
@@ -1062,10 +1100,34 @@ with tab4:
 if can_edit and tab_dev is not None:
     with tab_dev:
         st.subheader("🧪 開發測試區")
-        st.warning("此區僅供管理員測試；平常異動保留在本次工作階段，只有手動同步時才會寫入開發區試算表。")
+        st.info(
+            f"此區僅供管理員測試；開啟時會自動載入，所有異動會立即保存至 Google 試算表「{DEV_WORKSHEET_NAME}」。"
+        )
+
+        if not st.session_state.dev_cloud_initialized:
+            st.session_state.dev_cloud_initialized = True
+            try:
+                load_summary = load_latest_dev_data_from_google()
+                if load_summary:
+                    st.session_state.dev_flash_level = "success"
+                    st.session_state.dev_flash_message = (
+                        f"已自動載入雲端資料：{load_summary['廠別']} 個廠別、"
+                        f"{load_summary['案件']} 個案件、"
+                        f"{load_summary['測試結果']} 筆裝機紀錄。"
+                    )
+                else:
+                    st.session_state.dev_flash_level = "info"
+                    st.session_state.dev_flash_message = "雲端目前沒有開發區保存資料，將從空白資料開始。"
+            except Exception as e:
+                st.session_state.dev_flash_level = "error"
+                st.session_state.dev_flash_message = f"自動載入開發資料失敗：{e}"
+
+        auto_sync_pending_dev_data()
         if st.session_state.dev_flash_message:
-            st.success(st.session_state.dev_flash_message)
+            flash_renderer = getattr(st, st.session_state.dev_flash_level, st.info)
+            flash_renderer(st.session_state.dev_flash_message)
             st.session_state.dev_flash_message = ""
+            st.session_state.dev_flash_level = "success"
 
         dev_form_tab, dev_options_tab, dev_results_tab, dev_excel_tab = st.tabs([
             "📝 新版新增裝機",
@@ -1353,11 +1415,12 @@ if can_edit and tab_dev is not None:
                         st.session_state.dev_add_preview = None
                         st.session_state.dev_previous_prefill = None
                         if completed_count:
-                            st.success(
-                                f"已加入測試結果，並將 {completed_count} 筆相同廠別、案件、機台的紀錄更新為已完成。"
+                            queue_dev_auto_sync(
+                                f"已新增裝機紀錄，並將 {completed_count} 筆相同廠別、案件、機台的紀錄更新為已完成"
                             )
                         else:
-                            st.success("已加入測試結果，請至「📋 測試結果」分頁查看。")
+                            queue_dev_auto_sync("已新增裝機紀錄")
+                        st.rerun()
 
                 if st.button("清空原型表單", key="dev_clear_add_form"):
                     st.session_state.dev_add_form_key += 1
@@ -1372,7 +1435,7 @@ if can_edit and tab_dev is not None:
 
         with dev_options_tab:
             st.markdown("### 下拉選項管理")
-            st.caption("管理新版表單使用的廠別與案件選項；目前異動不會修改 Google Sheets。")
+            st.caption("管理新版表單使用的廠別與案件選項；新增、修改與刪除後會自動保存至 Google Sheets。")
 
             def render_option_manager(title, state_key, widget_prefix):
                 options = st.session_state[state_key]
@@ -1408,6 +1471,7 @@ if can_edit and tab_dev is not None:
                             options.sort()
                             if state_key == "dev_case_options":
                                 st.session_state.dev_case_checklists.setdefault(cleaned_name, [])
+                            queue_dev_auto_sync(f"已新增{title}「{cleaned_name}」")
                             st.session_state.dev_option_manager_key += 1
                             st.session_state.dev_add_form_key += 1
                             st.rerun()
@@ -1456,6 +1520,9 @@ if can_edit and tab_dev is not None:
                                     st.session_state.dev_case_checklists[cleaned_rename] = existing_items
                                     if st.session_state.dev_loaded_case == selected_option:
                                         st.session_state.dev_loaded_case = cleaned_rename
+                                queue_dev_auto_sync(
+                                    f"已將{title}「{selected_option}」修改為「{cleaned_rename}」"
+                                )
                                 st.session_state.dev_option_manager_key += 1
                                 st.session_state.dev_add_form_key += 1
                                 st.session_state.dev_add_preview = None
@@ -1467,6 +1534,7 @@ if can_edit and tab_dev is not None:
                                 st.session_state.dev_case_checklists.pop(selected_option, None)
                                 if st.session_state.dev_loaded_case == selected_option:
                                     st.session_state.dev_loaded_case = None
+                            queue_dev_auto_sync(f"已刪除{title}「{selected_option}」")
                             st.session_state.dev_option_manager_key += 1
                             st.session_state.dev_add_form_key += 1
                             st.session_state.dev_add_preview = None
@@ -1511,6 +1579,7 @@ if can_edit and tab_dev is not None:
                                 cleaned_items.append(cleaned_item)
 
                         st.session_state.dev_case_checklists[checklist_case] = cleaned_items
+                        queue_dev_auto_sync(f"已更新案件「{checklist_case}」的確認項目")
                         st.session_state.dev_option_manager_key += 1
                         st.session_state.dev_checklist_key += 1
                         st.session_state.dev_add_preview = None
@@ -1520,7 +1589,7 @@ if can_edit and tab_dev is not None:
 
         with dev_results_tab:
             st.markdown("### 新增裝機測試結果")
-            st.caption("此處顯示開發區確認加入的資料；只有手動按下同步按鈕時才會寫入 Google Sheets。")
+            st.caption("此處顯示開發區裝機資料；確認加入或狀態更新後會自動保存至 Google Sheets。")
 
             if st.session_state.dev_test_records:
                 results_df = pd.DataFrame(st.session_state.dev_test_records)
@@ -1571,64 +1640,20 @@ if can_edit and tab_dev is not None:
                     key="dev_clear_test_records",
                 ):
                     st.session_state.dev_test_records = []
+                    queue_dev_auto_sync("已清空所有開發區裝機紀錄")
                     st.rerun()
             else:
                 st.info("目前沒有測試資料。請先在「📝 新版新增裝機」完成輸入並確認加入。")
 
             st.divider()
-            st.markdown("### 同步開發資料")
-            st.caption("同步會保存完整快照；載入則會用最近一次快照取代目前工作階段內容。")
-            sync_col, load_col = st.columns(2)
-            with sync_col:
-                sync_clicked = st.button(
-                    "儲存目前內容",
-                    type="primary",
-                    use_container_width=True,
-                    key="dev_sync_to_google",
-                )
-            with load_col:
-                load_clicked = st.button(
-                    "載入上次保存內容",
-                    use_container_width=True,
-                    key="dev_load_from_google",
-                )
-
-            if sync_clicked:
-                with st.spinner("正在保存開發區資料..."):
-                    try:
-                        synced_count = sync_dev_data_to_google()
-                        if synced_count:
-                            st.success(
-                                f"保存完成！已將 {synced_count} 筆資料寫入「{DEV_WORKSHEET_NAME}」。"
-                            )
-                        else:
-                            st.warning("目前沒有可保存的廠別、案件或測試結果。")
-                    except Exception as e:
-                        st.error(f"保存失敗，請稍後再試。詳細錯誤：{e}")
-
-            if load_clicked:
-                with st.spinner("正在載入最近一次保存內容..."):
-                    try:
-                        load_summary = load_latest_dev_data_from_google()
-                        if load_summary:
-                            st.session_state.dev_flash_message = (
-                                f"已載入 {load_summary['批次']} 的保存內容："
-                                f"{load_summary['廠別']} 個廠別、"
-                                f"{load_summary['案件']} 個案件、"
-                                f"{load_summary['測試結果']} 筆測試結果。"
-                            )
-                            st.rerun()
-                        else:
-                            st.warning("目前找不到可載入的開發區保存內容。")
-                    except Exception as e:
-                        st.error(f"載入失敗，請稍後再試。詳細錯誤：{e}")
+            st.success(f"☁️ 已啟用自動同步：資料來源為「{DEV_WORKSHEET_NAME}」，不需手動儲存或載入。")
 
         with dev_excel_tab:
             st.markdown("### 多機台確認項目 Excel")
             st.caption("依範例格式，每台機台一列；已施工使用綠色儲存格，待施工使用黃色儲存格。")
 
             if not st.session_state.dev_test_records:
-                st.info("目前沒有可匯出的測試結果，請先新增資料或載入上次保存內容。")
+                st.info("目前沒有可匯出的測試結果，請先新增裝機資料。")
             else:
                 export_plants = sorted({
                     str(record.get("廠別", "")).strip()
