@@ -11,6 +11,9 @@ import requests
 import uuid
 import xlsxwriter
 from openpyxl import load_workbook
+from google.auth.transport.requests import AuthorizedSession
+from google.oauth2 import service_account
+from PIL import Image, ImageOps
 
 # ==================== 1. 網頁基本與連線設定 ====================
 st.set_page_config(page_title="鴻伍裝機日報系統", layout="wide")
@@ -171,6 +174,9 @@ NEW_INSTALLATION_HEADERS = [
     "最後修改者",
     "來源版本",
     "來源鍵",
+    "照片檔名",
+    "照片連結",
+    "照片ID",
 ]
 
 
@@ -248,6 +254,9 @@ def load_new_installation_records():
             "最後修改者": str(row.get("最後修改者", "")).strip(),
             "來源版本": str(row.get("來源版本", "")).strip() or "新版輸入",
             "來源鍵": str(row.get("來源鍵", "")).strip(),
+            "照片檔名": str(row.get("照片檔名", "")).strip(),
+            "照片連結": str(row.get("照片連結", "")).strip(),
+            "照片ID": str(row.get("照片ID", "")).strip(),
             "_new_sheet_row": sheet_row_number,
         })
     return records
@@ -275,6 +284,9 @@ def new_installation_row_values(record, existing_record=None):
         operator,
         str(record.get("來源版本") or existing_record.get("來源版本") or "新版輸入"),
         str(record.get("來源鍵") or existing_record.get("來源鍵") or ""),
+        str(record.get("照片檔名") or existing_record.get("照片檔名") or ""),
+        str(record.get("照片連結") or existing_record.get("照片連結") or ""),
+        str(record.get("照片ID") or existing_record.get("照片ID") or ""),
     ]
 
 
@@ -300,6 +312,30 @@ def update_new_installation_record(existing_record, updated_record):
         values=[values],
     )
     load_new_installation_records.clear()
+
+
+def delete_new_installation_record(record):
+    """依紀錄 ID 重新定位並刪除新版資料列，避免使用過期列號。"""
+    record_id = str(record.get("紀錄ID", "")).strip()
+    if not record_id:
+        raise ValueError("找不到新版裝機紀錄 ID。")
+
+    new_worksheet = get_new_installation_worksheet()
+    current_records = new_worksheet.get_all_records()
+    target_row_number = next(
+        (
+            row_number
+            for row_number, current_record in enumerate(current_records, start=2)
+            if str(current_record.get("紀錄ID", "")).strip() == record_id
+        ),
+        None,
+    )
+    if target_row_number is None:
+        raise ValueError("此筆新版裝機紀錄已不存在，請重新整理後再試。")
+
+    new_worksheet.delete_rows(target_row_number)
+    load_new_installation_records.clear()
+    return target_row_number
 
 
 def complete_matching_new_installation_records(record, exclude_record_id=""):
@@ -616,6 +652,82 @@ def upload_dev_attachment(uploaded_file, order_number, part_number):
     }
 
 
+def upload_installation_photo(photo_data, plant_name, case_name, machine_name):
+    """將新版裝機照片上傳至既有的私人 Drive 附件資料夾。"""
+    if not st.session_state.get("user_permissions", {}).get(
+        "attachment_upload",
+        st.session_state.get("user_role") == "管理者",
+    ):
+        raise PermissionError("目前帳號沒有上傳照片的權限。")
+
+    binary_data = photo_data.get("data", b"")
+    if not binary_data:
+        raise ValueError("照片內容為空白。")
+    if len(binary_data) > 10 * 1024 * 1024:
+        raise ValueError(f"照片「{photo_data.get('name', '')}」不可超過 10 MB。")
+
+    upload_url, upload_token = get_apps_script_upload_config()
+    original_name = str(photo_data.get("name") or "photo.jpg").strip()
+    context_prefix = "_".join([plant_name, case_name, machine_name])
+    context_prefix = re.sub(r'[\\/:*?"<>|]+', "-", context_prefix).strip() or "installation"
+    stored_name = (
+        f"{context_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{original_name}"
+    )
+    response = requests.post(
+        upload_url,
+        json={
+            "token": upload_token,
+            "action": "upload",
+            "fileName": stored_name,
+            "mimeType": photo_data.get("type") or "image/jpeg",
+            "data": base64.b64encode(binary_data).decode("ascii"),
+        },
+        timeout=180,
+    )
+    response.raise_for_status()
+    try:
+        drive_file = response.json()
+    except ValueError as e:
+        raise RuntimeError("Apps Script 未回傳有效的 JSON 資料。") from e
+    if not drive_file.get("ok"):
+        raise RuntimeError(drive_file.get("error") or "照片上傳失敗。")
+    return {
+        "id": str(drive_file.get("id", "")).strip(),
+        "name": original_name,
+        "url": str(drive_file.get("url", "")).strip(),
+    }
+
+
+def parse_installation_photo_list(value):
+    """解析新版裝機照片欄位；相容 JSON 陣列與單一舊值。"""
+    cleaned_value = str(value or "").strip()
+    if not cleaned_value:
+        return []
+    try:
+        parsed_value = json.loads(cleaned_value)
+        if isinstance(parsed_value, list):
+            return [str(item).strip() for item in parsed_value if str(item).strip()]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return [cleaned_value]
+
+
+def installation_photos_from_record(record):
+    """將三個照片欄位合併成方便顯示與下載的結構。"""
+    names = parse_installation_photo_list(record.get("照片檔名", ""))
+    links = parse_installation_photo_list(record.get("照片連結", ""))
+    file_ids = parse_installation_photo_list(record.get("照片ID", ""))
+    photo_count = max(len(names), len(links), len(file_ids), 0)
+    return [
+        {
+            "附件檔名": names[index] if index < len(names) else f"裝機照片 {index + 1}",
+            "附件連結": links[index] if index < len(links) else "",
+            "附件ID": file_ids[index] if index < len(file_ids) else "",
+        }
+        for index in range(photo_count)
+    ]
+
+
 def extract_drive_file_id(file_url):
     """從既有 Drive 連結取得檔案 ID，供舊紀錄刪除使用。"""
     cleaned_url = str(file_url or "").strip()
@@ -658,8 +770,54 @@ def delete_dev_attachment(file_id):
     return result
 
 
+@st.cache_resource(ttl=3600)
+def get_drive_download_session():
+    """建立僅具 Google Drive 讀取權限的服務帳號連線。"""
+    drive_scope = ["https://www.googleapis.com/auth/drive.readonly"]
+    if "gcp_service_account" in st.secrets:
+        credentials = service_account.Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]),
+            scopes=drive_scope,
+        )
+    else:
+        credentials = service_account.Credentials.from_service_account_file(
+            "credentials.json",
+            scopes=drive_scope,
+        )
+    return AuthorizedSession(credentials)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def download_private_drive_file(file_id):
+    """直接讀取私人 Drive 檔案，避免 Apps Script Base64 下載逾時。"""
+    cleaned_file_id = str(file_id or "").strip()
+    if not cleaned_file_id:
+        raise ValueError("找不到附件的 Drive 檔案 ID。")
+
+    session = get_drive_download_session()
+    api_url = f"https://www.googleapis.com/drive/v3/files/{cleaned_file_id}"
+    metadata_response = session.get(
+        api_url,
+        params={"fields": "id,name,mimeType,size"},
+        timeout=30,
+    )
+    metadata_response.raise_for_status()
+    metadata = metadata_response.json()
+    media_response = session.get(
+        api_url,
+        params={"alt": "media"},
+        timeout=120,
+    )
+    media_response.raise_for_status()
+    return {
+        "name": metadata.get("name", "attachment"),
+        "mime_type": metadata.get("mimeType", "application/octet-stream"),
+        "bytes": media_response.content,
+    }
+
+
 def download_dev_attachment(file_id):
-    """由 Apps Script 讀取附件內容，避免在 App 中暴露 Drive 直接連結。"""
+    """使用服務帳號安全讀取私人 Drive 附件。"""
     if not st.session_state.get("user_permissions", {}).get(
         "attachment_download",
         st.session_state.get("user_role") == "管理者",
@@ -670,28 +828,10 @@ def download_dev_attachment(file_id):
     if not cleaned_file_id:
         raise ValueError("找不到附件的 Drive 檔案 ID。")
 
-    upload_url, upload_token = get_apps_script_upload_config()
-    response = requests.post(
-        upload_url,
-        json={
-            "token": upload_token,
-            "action": "download",
-            "fileId": cleaned_file_id,
-        },
-        timeout=180,
-    )
-    response.raise_for_status()
     try:
-        result = response.json()
-    except ValueError as e:
-        raise RuntimeError("Apps Script 未回傳有效的 JSON 資料。") from e
-    if not result.get("ok"):
-        raise RuntimeError(result.get("error") or "Apps Script 下載附件失敗。")
-    return {
-        "name": result.get("name", "attachment"),
-        "mime_type": result.get("mimeType", "application/octet-stream"),
-        "bytes": base64.b64decode(result.get("data", "")),
-    }
+        return download_private_drive_file(cleaned_file_id)
+    except Exception as e:
+        raise RuntimeError(f"私人 Drive 附件下載失敗：{e}") from e
 
 
 def sync_dev_data_to_google():
@@ -2448,6 +2588,24 @@ def parse_checklist_summary(summary):
     return completed, incomplete
 
 
+def format_incomplete_reason(reason):
+    """將 1.、2.、A.、B. 等分項標記整理成各自一行。"""
+    reason_text = str(reason or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not reason_text:
+        return ""
+
+    # 標記後必須接非數字內容，避免將 1.25、2026.08.14 等數值或日期拆開。
+    item_marker = re.compile(
+        r"(\d{1,2}[.、)](?=\s*[^\d.\s])|(?<![A-Za-z])[A-Z][.、)](?=\s*[^.\s]))"
+    )
+    formatted_text = item_marker.sub(lambda match: f"\n{match.group(1)} ", reason_text)
+    return "\n".join(
+        line.strip()
+        for line in formatted_text.splitlines()
+        if line.strip()
+    )
+
+
 def parse_checklist_definition(checklist_lines):
     """解析 [主分類]、[[子分類]] 與其確認項目。"""
     groups = []
@@ -2862,7 +3020,9 @@ def build_dev_excel_export(machine_records, selected_checklist_items):
 
         status_column = 4 + len(selected_checklist_items)
         sheet.write(row_index, status_column, record.get("狀態", ""), cell_format)
-        incomplete_reason = str(record.get("未完成或缺貨原因", "")).strip()
+        incomplete_reason = format_incomplete_reason(
+            record.get("未完成或缺貨原因", "")
+        )
         if incomplete_reason:
             sheet.write_comment(
                 row_index,
@@ -2900,6 +3060,94 @@ def reset_dialog_selection():
         st.session_state[reset_key] += 1
 
 
+def adjust_photo_rotation(rotation_key, degrees):
+    """調整照片顯示角度，不修改 Drive 原始檔案。"""
+    st.session_state[rotation_key] = (
+        int(st.session_state.get(rotation_key, 0)) + degrees
+    ) % 360
+
+
+def toggle_photo_mirror(mirror_key):
+    """切換照片水平鏡像顯示。"""
+    st.session_state[mirror_key] = not bool(st.session_state.get(mirror_key, False))
+
+
+def transform_photo_for_display(photo_bytes, rotation_degrees=0, mirrored=False):
+    """套用 EXIF 方向、旋轉與鏡像後回傳畫面用圖片。"""
+    with Image.open(io.BytesIO(photo_bytes)) as source_image:
+        display_image = ImageOps.exif_transpose(source_image)
+        if mirrored:
+            display_image = ImageOps.mirror(display_image)
+        if rotation_degrees:
+            display_image = display_image.rotate(rotation_degrees, expand=True)
+        return display_image.copy()
+
+
+def render_installation_photo_popover(row_data, installation_photos):
+    """在詳細資料對話框上方顯示照片浮動面板，保留原視窗。"""
+    with st.popover(
+        f"📷 查看裝機照片（{len(installation_photos)}）",
+        use_container_width=True,
+    ):
+        if not st.session_state.get("user_permissions", {}).get(
+            "attachment_download",
+            st.session_state.get("user_role") == "管理者",
+        ):
+            st.warning("目前帳號沒有查看照片的權限。")
+            return
+
+        for photo_index, photo_record in enumerate(installation_photos, start=1):
+            photo_name = str(photo_record.get("附件檔名", "")).strip() or f"裝機照片 {photo_index}"
+            file_id = str(photo_record.get("附件ID", "")).strip() or extract_drive_file_id(
+                photo_record.get("附件連結", "")
+            )
+            photo_key = re.sub(
+                r"[^A-Za-z0-9_-]",
+                "_",
+                file_id or f"{row_data.get('紀錄ID', 'record')}_{photo_index}",
+            )
+            rotation_key = f"installation_photo_rotation_{photo_key}"
+            mirror_key = f"installation_photo_mirror_{photo_key}"
+            st.markdown(f"**{photo_index}. {photo_name}**")
+            control_col1, control_col2, control_col3 = st.columns(3)
+            with control_col1:
+                st.button(
+                    "↶ 左轉 90°",
+                    key=f"photo_rotate_left_{photo_key}",
+                    use_container_width=True,
+                    on_click=adjust_photo_rotation,
+                    args=(rotation_key, 90),
+                )
+            with control_col2:
+                st.button(
+                    "↷ 右轉 90°",
+                    key=f"photo_rotate_right_{photo_key}",
+                    use_container_width=True,
+                    on_click=adjust_photo_rotation,
+                    args=(rotation_key, -90),
+                )
+            with control_col3:
+                st.button(
+                    "⇋ 水平翻轉",
+                    key=f"photo_mirror_{photo_key}",
+                    use_container_width=True,
+                    on_click=toggle_photo_mirror,
+                    args=(mirror_key,),
+                )
+            try:
+                photo_file = download_private_drive_file(file_id)
+                display_image = transform_photo_for_display(
+                    photo_file["bytes"],
+                    st.session_state.get(rotation_key, 0),
+                    st.session_state.get(mirror_key, False),
+                )
+                st.image(display_image, caption=photo_name, use_container_width=True)
+            except Exception as e:
+                st.error(f"照片載入失敗：{e}")
+            if photo_index < len(installation_photos):
+                st.divider()
+
+
 @st.dialog("📝 詳細資料檢視", on_dismiss=reset_dialog_selection)
 def show_details_dialog(row_data, reset_key):
     st.session_state.active_dialog_reset_key = reset_key
@@ -2935,7 +3183,10 @@ def show_details_dialog(row_data, reset_key):
             st.write(row_data.get('項目確認', ''))
     if row_data.get('未完成或缺貨原因', ''):
         st.markdown("### ⚠️ 未完成原因：")
-        st.write(row_data.get('未完成或缺貨原因', ''))
+        st.text(format_incomplete_reason(row_data.get('未完成或缺貨原因', '')))
+    installation_photos = installation_photos_from_record(row_data)
+    if installation_photos:
+        render_installation_photo_popover(row_data, installation_photos)
     st.markdown("---")
     st.markdown("### 📝 Remark (備忘內容)：")
     
@@ -3090,6 +3341,84 @@ def show_dev_delete_dialog():
         return
 
     record_type = pending_delete.get("type")
+    if record_type == "installation":
+        record = dict(pending_delete.get("record") or {})
+        if not str(record.get("紀錄ID", "")).strip():
+            st.error("找不到要刪除的新版裝機資料，可能已被其他操作更新。")
+            return
+
+        installation_photos = installation_photos_from_record(record)
+        st.markdown(f"**日期：** {record.get('日期', '')}")
+        st.markdown(f"**廠別：** {record.get('廠別', '')}")
+        st.markdown(f"**案件：** {record.get('案件', '')}")
+        st.markdown(f"**機台名稱：** {record.get('機台名稱', '')}")
+        st.markdown(f"**照片：** {len(installation_photos)} 張")
+        st.error("確認後將刪除新版裝機資料，照片也會移至 Google Drive 垃圾桶。")
+        if str(record.get("來源版本", "")).strip() == "舊版轉換":
+            st.warning("此筆由舊版轉換；刪除新版後，原本的唯讀舊版紀錄會重新出現在搜尋結果。")
+
+        confirm_col, cancel_col = st.columns(2)
+        with confirm_col:
+            if st.button(
+                "確認刪除資料與照片",
+                type="primary",
+                use_container_width=True,
+                key=f"confirm_installation_delete_{st.session_state.dev_delete_dialog_key}",
+            ):
+                deleted_photo_names = []
+                try:
+                    if installation_photos:
+                        with st.spinner("正在將裝機照片移至 Google Drive 垃圾桶..."):
+                            for photo_record in installation_photos:
+                                file_id = str(photo_record.get("附件ID", "")).strip() or extract_drive_file_id(
+                                    photo_record.get("附件連結", "")
+                                )
+                                if not file_id:
+                                    raise ValueError(
+                                        f"照片「{photo_record.get('附件檔名', '')}」缺少 Drive 檔案 ID。"
+                                    )
+                                delete_dev_attachment(file_id)
+                                deleted_photo_names.append(
+                                    str(photo_record.get("附件檔名", "")).strip()
+                                )
+
+                    delete_new_installation_record(record)
+                    try:
+                        download_private_drive_file.clear()
+                    except Exception:
+                        pass
+                    action_message = (
+                        f"已刪除新版裝機紀錄：{record.get('廠別', '')}／"
+                        f"{record.get('案件', '')}／{record.get('機台名稱', '')}"
+                    )
+                    if deleted_photo_names:
+                        action_message += f"，並刪除 {len(deleted_photo_names)} 張照片"
+                    log_dev_delete_action(action_message, str(record))
+                    st.session_state.dev_pending_delete = None
+                    st.session_state.dev_delete_dialog_key += 1
+                    st.session_state.dev_results_edit_form_key += 1
+                    st.session_state.dev_results_grid_key += 1
+                    st.session_state.dev_flash_level = "success"
+                    st.session_state.dev_flash_message = action_message
+                    st.rerun()
+                except Exception as e:
+                    partial_message = (
+                        f"已移除 {len(deleted_photo_names)} 張照片，但裝機資料尚未刪除。"
+                        if deleted_photo_names else "裝機資料與照片均未刪除。"
+                    )
+                    st.error(f"刪除失敗。{partial_message} 詳細錯誤：{e}")
+
+        with cancel_col:
+            if st.button(
+                "取消",
+                use_container_width=True,
+                key=f"cancel_installation_delete_{st.session_state.dev_delete_dialog_key}",
+            ):
+                st.session_state.dev_pending_delete = None
+                st.session_state.dev_delete_dialog_key += 1
+                st.rerun()
+        return
+
     record_index = int(pending_delete.get("index", -1))
     records = (
         st.session_state.dev_sales_records
@@ -3766,6 +4095,18 @@ if can_edit and tab_dev is not None:
                         key=f"dev_remark_{dev_key}",
                     )
 
+                    st.markdown("#### 6. 裝機照片")
+                    dev_photos = st.file_uploader(
+                        "上傳照片（可多選）",
+                        type=["jpg", "jpeg", "png", "webp", "heic"],
+                        accept_multiple_files=True,
+                        disabled=not can_upload_attachment,
+                        help="最多 10 張，每張不可超過 10 MB；按下確認加入時才會上傳至私人 Google Drive。",
+                        key=f"dev_photos_{dev_key}",
+                    )
+                    if not can_upload_attachment:
+                        st.caption("目前帳號沒有上傳照片的權限。")
+
                     preview_submitted = st.form_submit_button(
                         "產生送出預覽",
                         type="primary",
@@ -3773,6 +4114,22 @@ if can_edit and tab_dev is not None:
                     )
 
                 if preview_submitted:
+                    photo_error = ""
+                    if len(dev_photos) > 10:
+                        photo_error = "一次最多只能上傳 10 張照片。"
+                    oversized_photos = [
+                        photo.name for photo in dev_photos
+                        if len(photo.getvalue()) > 10 * 1024 * 1024
+                    ]
+                    if oversized_photos:
+                        photo_error = (
+                            "下列照片超過 10 MB：" + "、".join(oversized_photos)
+                        )
+                    if photo_error:
+                        st.error(photo_error)
+                        st.session_state.dev_add_preview = None
+                        st.session_state.dev_pending_preview = None
+
                     checklist_summary = "、".join(
                         f"{'✅' if checked else '❌'} {item_name}"
                         for item_name, checked in checklist_results.items()
@@ -3786,10 +4143,19 @@ if can_edit and tab_dev is not None:
                         "安裝人員": "、".join(dev_installers) if dev_installers else "未指定",
                         "狀態": dev_status,
                         "Remark": dev_remark.strip(),
+                        "_待上傳照片": [
+                            {
+                                "name": photo.name,
+                                "type": photo.type or "image/jpeg",
+                                "data": photo.getvalue(),
+                            }
+                            for photo in dev_photos
+                        ],
                     }
-                    prepare_dev_preview(current_preview)
-                    if st.session_state.dev_pending_preview:
-                        show_dev_reason_dialog()
+                    if not photo_error:
+                        prepare_dev_preview(current_preview)
+                        if st.session_state.dev_pending_preview:
+                            show_dev_reason_dialog()
 
                 if st.session_state.dev_pending_preview and not preview_submitted:
                     show_dev_reason_dialog()
@@ -3797,7 +4163,21 @@ if can_edit and tab_dev is not None:
                 if st.session_state.dev_add_preview:
                     st.divider()
                     st.markdown("### 送出前預覽")
-                    preview_df = pd.DataFrame([st.session_state.dev_add_preview]).rename(
+                    preview_record = {
+                        key: value
+                        for key, value in st.session_state.dev_add_preview.items()
+                        if not str(key).startswith("_")
+                    }
+                    pending_photo_names = [
+                        photo.get("name", "")
+                        for photo in st.session_state.dev_add_preview.get("_待上傳照片", [])
+                    ]
+                    preview_record["照片"] = "、".join(pending_photo_names) or "（未上傳照片）"
+                    if preview_record.get("未完成或缺貨原因"):
+                        preview_record["未完成或缺貨原因"] = format_incomplete_reason(
+                            preview_record["未完成或缺貨原因"]
+                        )
+                    preview_df = pd.DataFrame([preview_record]).rename(
                         columns={"未完成或缺貨原因": "未完成原因"}
                     )
                     st.dataframe(preview_df, hide_index=True, use_container_width=True)
@@ -3810,15 +4190,43 @@ if can_edit and tab_dev is not None:
                         key="dev_confirm_test_record",
                     ):
                         test_record = dict(st.session_state.dev_add_preview)
+                        pending_photos = test_record.pop("_待上傳照片", [])
                         test_record["建立時間"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        uploaded_photos = []
+                        record_saved = False
                         try:
+                            for pending_photo in pending_photos:
+                                uploaded_photos.append(
+                                    upload_installation_photo(
+                                        pending_photo,
+                                        test_record.get("廠別", ""),
+                                        test_record.get("案件", ""),
+                                        test_record.get("機台名稱", ""),
+                                    )
+                                )
+                            test_record["照片檔名"] = json.dumps(
+                                [photo["name"] for photo in uploaded_photos],
+                                ensure_ascii=False,
+                            ) if uploaded_photos else ""
+                            test_record["照片連結"] = json.dumps(
+                                [photo["url"] for photo in uploaded_photos],
+                                ensure_ascii=False,
+                            ) if uploaded_photos else ""
+                            test_record["照片ID"] = json.dumps(
+                                [photo["id"] for photo in uploaded_photos],
+                                ensure_ascii=False,
+                            ) if uploaded_photos else ""
                             test_record["來源版本"] = "新版輸入"
                             new_record_id = append_new_installation_record(test_record)
+                            record_saved = True
                             if test_record.get("狀態") == "已完成":
-                                complete_matching_new_installation_records(
-                                    test_record,
-                                    exclude_record_id=new_record_id,
-                                )
+                                try:
+                                    complete_matching_new_installation_records(
+                                        test_record,
+                                        exclude_record_id=new_record_id,
+                                    )
+                                except Exception:
+                                    pass
                             st.session_state.dev_add_preview = None
                             st.session_state.dev_previous_prefill = None
                             st.session_state.dev_identity_draft = None
@@ -3827,10 +4235,17 @@ if can_edit and tab_dev is not None:
                             st.session_state.dev_checklist_key += 1
                             st.session_state.dev_flash_level = "success"
                             st.session_state.dev_flash_message = (
-                                f"已新增至「{NEW_INSTALLATION_WORKSHEET_NAME}」。"
+                                f"已新增至「{NEW_INSTALLATION_WORKSHEET_NAME}」"
+                                f"，並上傳 {len(uploaded_photos)} 張照片。"
                             )
                             st.rerun()
                         except Exception as e:
+                            if not record_saved:
+                                for uploaded_photo in uploaded_photos:
+                                    try:
+                                        delete_dev_attachment(uploaded_photo.get("id", ""))
+                                    except Exception:
+                                        pass
                             st.error(f"新版裝機紀錄儲存失敗：{e}")
 
                 if st.button("清空原型表單", key="dev_clear_add_form"):
@@ -4387,6 +4802,10 @@ if can_edit and tab_dev is not None:
                 display_results_df = display_results_df.rename(
                     columns={"未完成或缺貨原因": "未完成原因"}
                 )
+                if "未完成原因" in display_results_df.columns:
+                    display_results_df["未完成原因"] = display_results_df["未完成原因"].apply(
+                        format_incomplete_reason
+                    )
                 if "項目確認" in display_results_df.columns:
                     display_results_df["項目確認"] = display_results_df["項目確認"].apply(
                         format_checklist_progress
@@ -4540,6 +4959,29 @@ if can_edit and tab_dev is not None:
                             use_container_width=True,
                             disabled=edit_record_index is None,
                         )
+
+                    if (
+                        edit_record_index is not None
+                        and edit_record.get("_record_version") == "new"
+                    ):
+                        if st.button(
+                            "🗑️ 刪除此筆新版裝機資料",
+                            use_container_width=True,
+                            disabled=not can_delete_dev_data(),
+                            help="若紀錄包含照片，確認後會一併移至 Google Drive 垃圾桶。",
+                            key=f"delete_new_installation_{edit_record.get('紀錄ID', edit_record_index)}",
+                        ):
+                            st.session_state.dev_pending_delete = {
+                                "type": "installation",
+                                "record": dict(edit_record),
+                            }
+                            st.session_state.dev_delete_dialog_key += 1
+                            st.session_state.dev_results_grid_key += 1
+                            st.rerun()
+                        if not can_delete_dev_data():
+                            st.caption("目前帳號沒有刪除裝機資料與照片的權限。")
+                    elif edit_record_index is not None:
+                        st.caption("舊版資料為唯讀，不能在新版搜尋區刪除。")
 
                     if edit_submitted and edit_record_index is not None:
                         missing_edit_fields = []

@@ -2,6 +2,7 @@ streamlit>=1.60.0
 gspread
 pandas
 openpyxl
+Pillow
 requests
 xlsxwriter
 starlette<1.4.0
