@@ -89,6 +89,10 @@ if 'installation_excel_last_result' not in st.session_state:
     st.session_state.installation_excel_last_result = None
 if 'installation_excel_uploader_key' not in st.session_state:
     st.session_state.installation_excel_uploader_key = 0
+if 'installation_unrecorded_grid_key' not in st.session_state:
+    st.session_state.installation_unrecorded_grid_key = 0
+if 'installation_unrecorded_flash' not in st.session_state:
+    st.session_state.installation_unrecorded_flash = ""
 if 'dev_results_grid_key' not in st.session_state:
     st.session_state.dev_results_grid_key = 0
 if 'dev_results_edit_form_key' not in st.session_state:
@@ -2504,6 +2508,7 @@ def get_installation_comparison_worksheet():
     headers = [
         "比較ID", "紀錄類型", "比較時間", "比較者", "前版ID", "新版本ID",
         "前版檔名", "新版本檔名", "目標品號", "資料JSON",
+        "處理狀態", "處理時間", "處理者",
     ]
     try:
         comparison_worksheet = sh.worksheet(INSTALLATION_COMPARISON_WORKSHEET_NAME)
@@ -2519,7 +2524,13 @@ def get_installation_comparison_worksheet():
     existing_headers = comparison_worksheet.row_values(1)
     if not existing_headers:
         comparison_worksheet.append_row(headers)
-    elif existing_headers != headers:
+    elif existing_headers == headers[:len(existing_headers)]:
+        if len(existing_headers) < len(headers):
+            comparison_worksheet.update(
+                range_name=f"A1:{chr(ord('A') + len(headers) - 1)}1",
+                values=[headers],
+            )
+    else:
         raise ValueError(
             f"「{INSTALLATION_COMPARISON_WORKSHEET_NAME}」的欄位格式不符，請確認標題列。"
         )
@@ -2559,6 +2570,7 @@ def save_installation_excel_comparison(
         "比較資訊",
         *base_columns[2:],
         json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
+        "", "", "",
     ]]
     for record_type, records in [
         ("新增項目", added_rows),
@@ -2571,6 +2583,9 @@ def save_installation_excel_comparison(
                 record_type,
                 *base_columns[2:],
                 json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                "未紀錄" if record_type == "新增項目" else "",
+                "",
+                "",
             ]
             for record in records
         ])
@@ -2580,6 +2595,7 @@ def save_installation_excel_comparison(
         rows=comparison_worksheet.row_count + len(rows) + 50
     )
     comparison_worksheet.append_rows(rows, value_input_option="RAW")
+    load_unrecorded_installation_items.clear()
     return {
         "比較ID": comparison_id,
         "比較時間": comparison_time,
@@ -2588,7 +2604,10 @@ def save_installation_excel_comparison(
         "新版本ID": current_version["版本ID"],
         "前版檔名": previous_version["檔名"],
         "新版本檔名": current_version["檔名"],
-        "新增": added_rows,
+        "新增": [
+            {**record, "紀錄狀態": "未紀錄"}
+            for record in added_rows
+        ],
         "刪除": removed_rows,
         "數量變更": quantity_changes,
     }
@@ -2628,11 +2647,137 @@ def load_installation_excel_comparisons():
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if isinstance(saved_record, dict):
+            if target_key == "新增":
+                record_status = str(row.get("處理狀態", "")).strip()
+                if record_status:
+                    saved_record["紀錄狀態"] = record_status
             comparison[target_key].append(saved_record)
     return sorted(
         comparisons.values(),
         key=lambda comparison: (comparison["比較時間"], comparison["比較ID"]),
     )
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_unrecorded_installation_items():
+    """載入比較後新增、且尚未標記為已記錄的項目。"""
+    comparison_worksheet = get_installation_comparison_worksheet()
+    unrecorded_items = []
+    for sheet_row, row in enumerate(comparison_worksheet.get_all_records(), start=2):
+        if (
+            str(row.get("紀錄類型", "")).strip() != "新增項目"
+            or str(row.get("處理狀態", "")).strip() != "未紀錄"
+        ):
+            continue
+        try:
+            saved_record = json.loads(str(row.get("資料JSON", "")))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(saved_record, dict):
+            continue
+        unrecorded_items.append({
+            "工作表列": sheet_row,
+            "比較ID": str(row.get("比較ID", "")).strip(),
+            "比較時間": str(row.get("比較時間", "")).strip(),
+            "新版本檔名": str(row.get("新版本檔名", "")).strip(),
+            **installation_excel_display_row(saved_record),
+            "紀錄狀態": "未紀錄",
+        })
+    return unrecorded_items
+
+
+def mark_installation_items_recorded(sheet_rows):
+    """將指定比較紀錄列批次標記為已記錄。"""
+    cleaned_rows = sorted({int(row_number) for row_number in sheet_rows})
+    if not cleaned_rows:
+        return 0
+    comparison_worksheet = get_installation_comparison_worksheet()
+    processed_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    processor = f"{st.session_state.user_name} ({st.session_state.user_role})"
+    comparison_worksheet.batch_update(
+        [
+            {
+                "range": f"K{row_number}:M{row_number}",
+                "values": [["已記錄", processed_time, processor]],
+            }
+            for row_number in cleaned_rows
+        ],
+        value_input_option="USER_ENTERED",
+    )
+    load_unrecorded_installation_items.clear()
+    load_installation_excel_comparisons.clear()
+    st.session_state.installation_excel_last_result = None
+    try:
+        ws_log.append_row(
+            [
+                processed_time,
+                processor,
+                f"將 {len(cleaned_rows)} 筆客戶訂單新增項目標記為已記錄",
+                "未紀錄",
+                "已記錄",
+            ],
+            table_range="A:E",
+        )
+    except Exception:
+        pass
+    return len(cleaned_rows)
+
+
+@st.dialog("📋 未紀錄項目", width="large")
+def show_unrecorded_installation_items_dialog():
+    """集中顯示未紀錄項目，供使用者勾選後批次完成記錄。"""
+    unrecorded_items = load_unrecorded_installation_items()
+    if not unrecorded_items:
+        st.success("目前沒有未紀錄項目。")
+        return
+
+    st.caption(f"目前共有 {len(unrecorded_items)} 筆未紀錄項目，請勾選已完成記錄的資料。")
+    editor_rows = []
+    for item in unrecorded_items:
+        editor_rows.append({
+            "勾選": False,
+            "工作表列": item["工作表列"],
+            "比較時間": item["比較時間"],
+            "來源檔案": item["新版本檔名"],
+            "訂單": item["訂單"],
+            "客戶簡稱": item["客戶簡稱"],
+            "業務員名稱": item["業務員名稱"],
+            "品號": item["品號"],
+            "品名": item["品名"],
+            "訂單數量": item["訂單數量"],
+            "未交數量": item["未交數量"],
+            "已交數量": item["已交數量"],
+            "狀態": item["紀錄狀態"],
+        })
+    editor_df = pd.DataFrame(editor_rows)
+    edited_df = st.data_editor(
+        editor_df,
+        hide_index=True,
+        use_container_width=True,
+        disabled=[column for column in editor_df.columns if column != "勾選"],
+        column_config={
+            "勾選": st.column_config.CheckboxColumn("勾選", default=False),
+            "工作表列": None,
+        },
+        key=f"installation_unrecorded_editor_{st.session_state.installation_unrecorded_grid_key}",
+    )
+    selected_rows = edited_df.loc[edited_df["勾選"], "工作表列"].tolist()
+    if st.button(
+        f"✅ 將選取的 {len(selected_rows)} 筆改為已記錄",
+        type="primary",
+        use_container_width=True,
+        disabled=not selected_rows,
+        key=f"installation_unrecorded_save_{st.session_state.installation_unrecorded_grid_key}",
+    ):
+        try:
+            updated_count = mark_installation_items_recorded(selected_rows)
+            st.session_state.installation_unrecorded_flash = (
+                f"已將 {updated_count} 筆項目改為「已記錄」。"
+            )
+            st.session_state.installation_unrecorded_grid_key += 1
+            st.rerun()
+        except Exception as error:
+            st.error(f"狀態更新失敗：{error}")
 
 
 def build_installation_comparison_excel(comparison):
@@ -2717,7 +2862,12 @@ def build_installation_comparison_excel(comparison):
                 width = 16
             worksheet.set_column(column_index, column_index, width)
 
-    write_detail_sheet("新增項目", comparison["新增"], INSTALLATION_ORDER_FIELDS, "#548235")
+    write_detail_sheet(
+        "新增項目",
+        comparison["新增"],
+        [*INSTALLATION_ORDER_FIELDS, "紀錄狀態"],
+        "#548235",
+    )
     write_detail_sheet("刪除項目", comparison["刪除"], INSTALLATION_ORDER_FIELDS, "#C00000")
     quantity_headers = [
         *INSTALLATION_IDENTITY_FIELDS,
@@ -2784,9 +2934,21 @@ def render_installation_excel_version_area():
     try:
         versions = load_installation_excel_versions(order_number, part_number)
         comparison_history = load_installation_excel_comparisons()
+        unrecorded_items = load_unrecorded_installation_items()
     except Exception as error:
         st.error(f"無法讀取 Excel 版本或比較紀錄：{error}")
         return
+
+    if st.session_state.installation_unrecorded_flash:
+        st.success(st.session_state.installation_unrecorded_flash)
+        st.session_state.installation_unrecorded_flash = ""
+    if st.button(
+        f"📋 查看未紀錄項目（{len(unrecorded_items)}）",
+        use_container_width=True,
+        disabled=not unrecorded_items,
+        key="installation_open_unrecorded_items",
+    ):
+        show_unrecorded_installation_items_dialog()
 
     if versions:
         history_df = pd.DataFrame([
