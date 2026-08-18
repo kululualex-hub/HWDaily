@@ -170,6 +170,7 @@ NEW_INSTALLATION_WORKSHEET_NAME = "新版裝機紀錄"
 INSTALLATION_EXCEL_WORKSHEET_NAME = "裝機Excel版本紀錄"
 INSTALLATION_COMPARISON_WORKSHEET_NAME = "裝機Excel比較紀錄"
 REPORT_ENTRY_WORKSHEET_NAME = "報告新增資料"
+REPORT_SETTINGS_WORKSHEET_NAME = "報告月份設定"
 REPORT_DATA_FILE = Path(__file__).resolve().with_name("data.xlsx")
 REPORT_AREA_ORDER = ["北", "中", "南", "國外"]
 REPORT_COUNT_COLUMNS = ["訂單數量", "已出貨", "未出貨", "已安裝", "已出貨待安裝"]
@@ -179,6 +180,7 @@ REPORT_ENTRY_HEADERS = [
     *REPORT_COUNT_COLUMNS,
     *REPORT_MONTH_COLUMNS,
 ]
+REPORT_SETTINGS_HEADERS = ["設定鍵", "設定值", "更新時間", "更新者", "操作"]
 
 NEW_INSTALLATION_HEADERS = [
     "紀錄ID",
@@ -310,6 +312,124 @@ def load_report_entry_records():
     return report_df
 
 
+@st.cache_resource(show_spinner=False)
+def get_report_settings_worksheet():
+    """取得報告月份設定分頁；不存在時自動建立。"""
+    try:
+        settings_worksheet = sh.worksheet(REPORT_SETTINGS_WORKSHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        settings_worksheet = sh.add_worksheet(
+            title=REPORT_SETTINGS_WORKSHEET_NAME,
+            rows=200,
+            cols=len(REPORT_SETTINGS_HEADERS),
+        )
+    if settings_worksheet.col_count < len(REPORT_SETTINGS_HEADERS):
+        settings_worksheet.resize(cols=len(REPORT_SETTINGS_HEADERS))
+    existing_headers = settings_worksheet.row_values(1)
+    if not existing_headers:
+        settings_worksheet.append_row(REPORT_SETTINGS_HEADERS)
+    elif existing_headers != REPORT_SETTINGS_HEADERS:
+        raise ValueError(
+            f"「{REPORT_SETTINGS_WORKSHEET_NAME}」欄位格式不符，請確認標題列。"
+        )
+    return settings_worksheet
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_report_active_month():
+    """讀取目前統計月份；首次使用時預設為系統月份（限定 4 至 12 月）。"""
+    settings_worksheet = get_report_settings_worksheet()
+    for row in reversed(settings_worksheet.get_all_records()):
+        if str(row.get("設定鍵", "")).strip() != "目前統計月份":
+            continue
+        try:
+            month_value = int(row.get("設定值", 0))
+        except (TypeError, ValueError):
+            continue
+        if 4 <= month_value <= 12:
+            return month_value
+
+    default_month = min(max(datetime.now().month, 4), 12)
+    operator = f"{st.session_state.user_name} ({st.session_state.user_role})"
+    settings_worksheet.append_row(
+        [
+            "目前統計月份",
+            default_month,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            operator,
+            "建立預設設定",
+        ],
+        value_input_option="USER_ENTERED",
+    )
+    return default_month
+
+
+def set_report_active_month(month_value, action):
+    """以歷史追加方式保存目前統計月份。"""
+    month_value = int(month_value)
+    if not 4 <= month_value <= 12:
+        raise ValueError("統計月份必須介於 4 月至 12 月。")
+    settings_worksheet = get_report_settings_worksheet()
+    update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    operator = f"{st.session_state.user_name} ({st.session_state.user_role})"
+    settings_worksheet.append_row(
+        ["目前統計月份", month_value, update_time, operator, action],
+        value_input_option="USER_ENTERED",
+    )
+    load_report_active_month.clear()
+    try:
+        ws_log.append_row(
+            [
+                update_time,
+                operator,
+                action,
+                "",
+                f"{month_value} 月",
+            ],
+            table_range="A:E",
+        )
+    except Exception:
+        pass
+    return month_value
+
+
+@st.dialog("🔒 確認月份結算")
+def show_report_month_settlement_dialog(active_month):
+    """確認結算目前月份並切換到下一個月份。"""
+    next_month = int(active_month) + 1
+    st.warning(
+        f"確認結算 {active_month} 月並切換至 {next_month} 月嗎？"
+        f"之後新增或修改只會重新計算 {next_month} 月完成率，"
+        f"{active_month} 月與更早月份會沿用既有快照。"
+    )
+    confirm_col, cancel_col = st.columns(2)
+    with confirm_col:
+        if st.button(
+            f"確認結算 {active_month} 月",
+            type="primary",
+            use_container_width=True,
+            key=f"confirm_report_month_{active_month}",
+        ):
+            try:
+                set_report_active_month(
+                    next_month,
+                    f"結算 {active_month} 月並切換至 {next_month} 月",
+                )
+                st.session_state.report_flash_message = (
+                    f"已結算 {active_month} 月，目前統計月份為 {next_month} 月。"
+                )
+                st.rerun()
+            except Exception as error:
+                st.error(f"月份結算失敗：{error}")
+    with cancel_col:
+        if st.button(
+            "取消",
+            use_container_width=True,
+            key=f"cancel_report_month_{active_month}",
+        ):
+            st.rerun()
+
+
 def append_report_entry(
     area,
     plant,
@@ -323,7 +443,7 @@ def append_report_entry(
     """新增報告快照，並在 Google Sheets 寫入衍生欄位公式。"""
     report_worksheet = get_report_entry_worksheet()
     next_row = len(report_worksheet.col_values(1)) + 1
-    current_month = datetime.now().month
+    current_month = load_report_active_month()
     operator = f"{st.session_state.user_name} ({st.session_state.user_role})"
     row_values = {
         "建立時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -391,6 +511,7 @@ def render_report_area():
             REPORT_DATA_FILE.stat().st_mtime_ns,
         )
         added_report_df = load_report_entry_records()
+        active_report_month = load_report_active_month()
         report_df = pd.concat(
             [frame for frame in [base_report_df, added_report_df] if not frame.empty],
             ignore_index=True,
@@ -412,9 +533,56 @@ def render_report_area():
         st.success(st.session_state.report_flash_message)
         st.session_state.report_flash_message = ""
 
+    with st.expander("🗓️ 統計月份設定", expanded=True):
+        st.info(
+            f"目前統計月份：{active_report_month} 月。新增或修改資料時，"
+            f"只會重新計算 {active_report_month} 月完成率。"
+        )
+        month_setting_col1, month_setting_col2 = st.columns([2, 1])
+        with month_setting_col1:
+            selected_report_month = st.selectbox(
+                "目前統計月份",
+                list(range(4, 13)),
+                index=list(range(4, 13)).index(active_report_month),
+                format_func=lambda month: f"{month} 月",
+                key=f"report_active_month_selector_{active_report_month}",
+            )
+        with month_setting_col2:
+            st.write("")
+            st.write("")
+            if st.button(
+                "儲存月份設定",
+                use_container_width=True,
+                disabled=selected_report_month == active_report_month,
+                key=f"report_save_active_month_{active_report_month}",
+            ):
+                try:
+                    set_report_active_month(
+                        selected_report_month,
+                        f"將目前統計月份由 {active_report_month} 月調整為 {selected_report_month} 月",
+                    )
+                    st.session_state.report_flash_message = (
+                        f"目前統計月份已設定為 {selected_report_month} 月。"
+                    )
+                    st.rerun()
+                except Exception as error:
+                    st.error(f"月份設定保存失敗：{error}")
+
+        if active_report_month < 12:
+            if st.button(
+                f"🔒 結算 {active_report_month} 月並切換至 {active_report_month + 1} 月",
+                type="primary",
+                use_container_width=True,
+                key=f"report_settle_month_{active_report_month}",
+            ):
+                show_report_month_settlement_dialog(active_report_month)
+        else:
+            st.caption("目前已是 12 月；下一年度開始時請使用上方選單手動設定月份。")
+
     with st.expander("➕ 新增報告資料", expanded=False):
         st.caption(
-            "請輸入基本數量；未出貨、已出貨待安裝及本月份完成率會由 Google Sheets 公式自動計算。"
+            f"請輸入基本數量；未出貨、已出貨待安裝及 {active_report_month} 月完成率"
+            "會由 Google Sheets 公式自動計算。"
         )
         report_form_key = st.session_state.report_add_form_key
         add_row1_col1, add_row1_col2, add_row1_col3 = st.columns(3)
