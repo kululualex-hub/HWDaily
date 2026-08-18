@@ -2755,7 +2755,7 @@ def save_installation_excel_comparison(
                 record_type,
                 *base_columns[2:],
                 json.dumps(record, ensure_ascii=False, separators=(",", ":")),
-                "未紀錄" if record_type == "新增項目" else "",
+                "未紀錄",
                 "",
                 "",
             ]
@@ -2780,8 +2780,14 @@ def save_installation_excel_comparison(
             {**record, "紀錄狀態": "未紀錄"}
             for record in added_rows
         ],
-        "刪除": removed_rows,
-        "數量變更": quantity_changes,
+        "刪除": [
+            {**record, "紀錄狀態": "未紀錄"}
+            for record in removed_rows
+        ],
+        "數量變更": [
+            {**record, "紀錄狀態": "未紀錄"}
+            for record in quantity_changes
+        ],
     }
 
 
@@ -2819,10 +2825,9 @@ def load_installation_excel_comparisons():
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if isinstance(saved_record, dict):
-            if target_key == "新增":
-                record_status = str(row.get("處理狀態", "")).strip()
-                if record_status:
-                    saved_record["紀錄狀態"] = record_status
+            record_status = str(row.get("處理狀態", "")).strip()
+            if record_status:
+                saved_record["紀錄狀態"] = record_status
             comparison[target_key].append(saved_record)
     return sorted(
         comparisons.values(),
@@ -2832,14 +2837,15 @@ def load_installation_excel_comparisons():
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_unrecorded_installation_items():
-    """載入比較後新增、且尚未標記為已記錄的項目。"""
+    """載入比較後新增、刪除或數量變更且尚未標記為已記錄的項目。"""
     comparison_worksheet = get_installation_comparison_worksheet()
     unrecorded_items = []
+    supported_record_types = {"新增項目", "刪除項目", "數量變更"}
     for sheet_row, row in enumerate(comparison_worksheet.get_all_records(), start=2):
-        if (
-            str(row.get("紀錄類型", "")).strip() != "新增項目"
-            or str(row.get("處理狀態", "")).strip() != "未紀錄"
-        ):
+        record_type = str(row.get("紀錄類型", "")).strip()
+        if record_type not in supported_record_types:
+            continue
+        if str(row.get("處理狀態", "")).strip() != "未紀錄":
             continue
         try:
             saved_record = json.loads(str(row.get("資料JSON", "")))
@@ -2847,12 +2853,41 @@ def load_unrecorded_installation_items():
             continue
         if not isinstance(saved_record, dict):
             continue
+        if record_type == "數量變更":
+            display_record = {
+                **{
+                    field_name: saved_record.get(field_name, "")
+                    for field_name in INSTALLATION_IDENTITY_FIELDS
+                },
+                **{
+                    field_name: saved_record.get(f"新{field_name}", "")
+                    for field_name in INSTALLATION_QUANTITY_FIELDS
+                },
+            }
+            quantity_change_text = "；".join(
+                f"{field_name}：{saved_record.get(f'原{field_name}', '')} → "
+                f"{saved_record.get(f'新{field_name}', '')}"
+                for field_name in INSTALLATION_QUANTITY_FIELDS
+                if saved_record.get(f"原{field_name}", "")
+                != saved_record.get(f"新{field_name}", "")
+            )
+        else:
+            display_record = installation_excel_display_row(saved_record)
+            quantity_change_text = ""
+        source_filename = (
+            str(row.get("前版檔名", "")).strip()
+            if record_type == "刪除項目"
+            else str(row.get("新版本檔名", "")).strip()
+        )
         unrecorded_items.append({
             "工作表列": sheet_row,
             "比較ID": str(row.get("比較ID", "")).strip(),
             "比較時間": str(row.get("比較時間", "")).strip(),
+            "差異分類": record_type,
+            "來源檔案": source_filename,
             "新版本檔名": str(row.get("新版本檔名", "")).strip(),
-            **installation_excel_display_row(saved_record),
+            **display_record,
+            "數量變更內容": quantity_change_text,
             "紀錄狀態": "未紀錄",
         })
     return unrecorded_items
@@ -2884,7 +2919,7 @@ def mark_installation_items_recorded(sheet_rows):
             [
                 processed_time,
                 processor,
-                f"將 {len(cleaned_rows)} 筆客戶訂單新增項目標記為已記錄",
+                f"將 {len(cleaned_rows)} 筆客戶訂單差異項目標記為已記錄",
                 "未紀錄",
                 "已記錄",
             ],
@@ -2911,37 +2946,66 @@ def render_unrecorded_installation_items_panel():
         st.info("目前沒有未紀錄項目。")
         return
 
-    st.caption(f"目前共有 {len(unrecorded_items)} 筆未紀錄項目，請勾選已完成記錄的資料。")
-    editor_rows = []
-    for item in unrecorded_items:
-        editor_rows.append({
-            "勾選": False,
-            "工作表列": item["工作表列"],
-            "比較時間": item["比較時間"],
-            "來源檔案": item["新版本檔名"],
-            "訂單": item["訂單"],
-            "客戶簡稱": item["客戶簡稱"],
-            "業務員名稱": item["業務員名稱"],
-            "品號": item["品號"],
-            "品名": item["品名"],
-            "訂單數量": item["訂單數量"],
-            "未交數量": item["未交數量"],
-            "已交數量": item["已交數量"],
-            "狀態": item["紀錄狀態"],
-        })
-    editor_df = pd.DataFrame(editor_rows)
-    edited_df = st.data_editor(
-        editor_df,
-        hide_index=True,
-        use_container_width=True,
-        disabled=[column for column in editor_df.columns if column != "勾選"],
-        column_config={
-            "勾選": st.column_config.CheckboxColumn("勾選", default=False),
-            "工作表列": None,
-        },
-        key=f"installation_unrecorded_editor_{st.session_state.installation_unrecorded_grid_key}",
-    )
-    selected_rows = edited_df.loc[edited_df["勾選"], "工作表列"].tolist()
+    st.caption(f"目前共有 {len(unrecorded_items)} 筆未紀錄項目，請在各分類勾選已完成記錄的資料。")
+    category_order = ["新增項目", "刪除項目", "數量變更"]
+    category_counts = {
+        category: sum(
+            item["差異分類"] == category
+            for item in unrecorded_items
+        )
+        for category in category_order
+    }
+    category_tabs = st.tabs([
+        f"{category}（{category_counts[category]}）"
+        for category in category_order
+    ])
+    selected_rows = []
+    for category, category_tab in zip(category_order, category_tabs):
+        with category_tab:
+            category_items = [
+                item
+                for item in unrecorded_items
+                if item["差異分類"] == category
+            ]
+            if not category_items:
+                st.info(f"目前沒有未紀錄的{category}。")
+                continue
+            editor_rows = []
+            for item in category_items:
+                editor_rows.append({
+                    "勾選": False,
+                    "工作表列": item["工作表列"],
+                    "比較時間": item["比較時間"],
+                    "來源檔案": item["來源檔案"],
+                    "訂單": item["訂單"],
+                    "客戶簡稱": item["客戶簡稱"],
+                    "業務員名稱": item["業務員名稱"],
+                    "品號": item["品號"],
+                    "品名": item["品名"],
+                    "訂單數量": item["訂單數量"],
+                    "未交數量": item["未交數量"],
+                    "已交數量": item["已交數量"],
+                    "數量變更內容": item["數量變更內容"],
+                    "狀態": item["紀錄狀態"],
+                })
+            editor_df = pd.DataFrame(editor_rows)
+            edited_df = st.data_editor(
+                editor_df,
+                hide_index=True,
+                use_container_width=True,
+                disabled=[column for column in editor_df.columns if column != "勾選"],
+                column_config={
+                    "勾選": st.column_config.CheckboxColumn("勾選", default=False),
+                    "工作表列": None,
+                },
+                key=(
+                    f"installation_unrecorded_editor_{category}_"
+                    f"{st.session_state.installation_unrecorded_grid_key}"
+                ),
+            )
+            selected_rows.extend(
+                edited_df.loc[edited_df["勾選"], "工作表列"].tolist()
+            )
     if st.button(
         f"✅ 將選取的 {len(selected_rows)} 筆改為已記錄",
         type="primary",
@@ -3048,13 +3112,23 @@ def build_installation_comparison_excel(comparison):
         [*INSTALLATION_ORDER_FIELDS, "紀錄狀態"],
         "#548235",
     )
-    write_detail_sheet("刪除項目", comparison["刪除"], INSTALLATION_ORDER_FIELDS, "#C00000")
+    write_detail_sheet(
+        "刪除項目",
+        comparison["刪除"],
+        [*INSTALLATION_ORDER_FIELDS, "紀錄狀態"],
+        "#C00000",
+    )
     quantity_headers = [
         *INSTALLATION_IDENTITY_FIELDS,
         *[f"原{field_name}" for field_name in INSTALLATION_QUANTITY_FIELDS],
         *[f"新{field_name}" for field_name in INSTALLATION_QUANTITY_FIELDS],
     ]
-    write_detail_sheet("數量變更", comparison["數量變更"], quantity_headers, "#BF9000")
+    write_detail_sheet(
+        "數量變更",
+        comparison["數量變更"],
+        [*quantity_headers, "紀錄狀態"],
+        "#BF9000",
+    )
     workbook.close()
     output.seek(0)
     return output.getvalue()
