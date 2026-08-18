@@ -690,6 +690,10 @@ def render_report_area():
                 except Exception as e:
                     st.error(f"報告資料新增失敗：{e}")
 
+    st.divider()
+    st.markdown("### 未紀錄項目與資料修改")
+    render_unrecorded_installation_items_panel()
+
     with st.expander("✏️ 修改報告資料", expanded=False):
         st.caption("依序選擇區域、廠區與工程名稱後，系統會自動帶入目前數量。")
         edit_form_key = st.session_state.report_edit_form_key
@@ -2891,12 +2895,20 @@ def mark_installation_items_recorded(sheet_rows):
     return len(cleaned_rows)
 
 
-@st.dialog("📋 未紀錄項目", width="large")
-def show_unrecorded_installation_items_dialog():
-    """集中顯示未紀錄項目，供使用者勾選後批次完成記錄。"""
-    unrecorded_items = load_unrecorded_installation_items()
+def render_unrecorded_installation_items_panel():
+    """在報告頁面顯示未紀錄項目，供使用者勾選後批次完成記錄。"""
+    st.markdown("#### 📋 未紀錄項目")
+    if st.session_state.installation_unrecorded_flash:
+        st.success(st.session_state.installation_unrecorded_flash)
+        st.session_state.installation_unrecorded_flash = ""
+
+    try:
+        unrecorded_items = load_unrecorded_installation_items()
+    except Exception as error:
+        st.error(f"無法讀取未紀錄項目：{error}")
+        return
     if not unrecorded_items:
-        st.success("目前沒有未紀錄項目。")
+        st.info("目前沒有未紀錄項目。")
         return
 
     st.caption(f"目前共有 {len(unrecorded_items)} 筆未紀錄項目，請勾選已完成記錄的資料。")
@@ -3102,21 +3114,9 @@ def render_installation_excel_version_area():
     try:
         versions = load_installation_excel_versions(order_number, part_number)
         comparison_history = load_installation_excel_comparisons()
-        unrecorded_items = load_unrecorded_installation_items()
     except Exception as error:
         st.error(f"無法讀取 Excel 版本或比較紀錄：{error}")
         return
-
-    if st.session_state.installation_unrecorded_flash:
-        st.success(st.session_state.installation_unrecorded_flash)
-        st.session_state.installation_unrecorded_flash = ""
-    if st.button(
-        f"📋 查看未紀錄項目（{len(unrecorded_items)}）",
-        use_container_width=True,
-        disabled=not unrecorded_items,
-        key="installation_open_unrecorded_items",
-    ):
-        show_unrecorded_installation_items_dialog()
 
     if versions:
         history_df = pd.DataFrame([
