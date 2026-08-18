@@ -2,6 +2,7 @@ import streamlit as st
 import gspread
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 import base64
 import io
 import json
@@ -29,6 +30,12 @@ if 'user_id' not in st.session_state:
     st.session_state.user_id = ""
 if 'user_permissions' not in st.session_state:
     st.session_state.user_permissions = {}
+if 'report_add_form_key' not in st.session_state:
+    st.session_state.report_add_form_key = 0
+if 'report_edit_form_key' not in st.session_state:
+    st.session_state.report_edit_form_key = 0
+if 'report_flash_message' not in st.session_state:
+    st.session_state.report_flash_message = ""
 
 if 'tab1_search_active' not in st.session_state:
     st.session_state.tab1_search_active = False
@@ -104,6 +111,8 @@ if 'dev_pending_sync_message' not in st.session_state:
     st.session_state.dev_pending_sync_message = ""
 if 'dev_pending_delete' not in st.session_state:
     st.session_state.dev_pending_delete = None
+if 'dev_checklist_navigation_case' not in st.session_state:
+    st.session_state.dev_checklist_navigation_case = ""
 if 'dev_delete_dialog_key' not in st.session_state:
     st.session_state.dev_delete_dialog_key = 0
 if 'dev_pending_previous_record' not in st.session_state:
@@ -156,6 +165,16 @@ DEV_WORKSHEET_NAME = "開發區測試資料"
 NEW_INSTALLATION_WORKSHEET_NAME = "新版裝機紀錄"
 INSTALLATION_EXCEL_WORKSHEET_NAME = "裝機Excel版本紀錄"
 INSTALLATION_COMPARISON_WORKSHEET_NAME = "裝機Excel比較紀錄"
+REPORT_ENTRY_WORKSHEET_NAME = "報告新增資料"
+REPORT_DATA_FILE = Path(__file__).resolve().with_name("data.xlsx")
+REPORT_AREA_ORDER = ["北", "中", "南", "國外"]
+REPORT_COUNT_COLUMNS = ["訂單數量", "已出貨", "未出貨", "已安裝", "已出貨待安裝"]
+REPORT_MONTH_COLUMNS = [f"{month}月份完成率" for month in range(4, 13)]
+REPORT_ENTRY_HEADERS = [
+    "建立時間", "建立者", "區域", "廠區", "工程名稱",
+    *REPORT_COUNT_COLUMNS,
+    *REPORT_MONTH_COLUMNS,
+]
 
 NEW_INSTALLATION_HEADERS = [
     "紀錄ID",
@@ -184,6 +203,517 @@ NEW_INSTALLATION_HEADERS = [
 def load_production_installation_records():
     """共用正式裝機紀錄快取，避免每個 Streamlit 分頁重複讀取同一工作表。"""
     return worksheet.get_all_records()
+
+
+@st.cache_data(show_spinner=False)
+def load_report_data(file_path, modified_time_ns):
+    """讀取報告 Excel；modified_time_ns 只用來讓檔案更新後自動失效快取。"""
+    del modified_time_ns
+    workbook_sheets = pd.read_excel(file_path, sheet_name=None, header=0)
+    report_frames = []
+
+    for area_name in REPORT_AREA_ORDER:
+        if area_name not in workbook_sheets:
+            continue
+        area_df = workbook_sheets[area_name].copy()
+        area_df.columns = [
+            re.sub(r"\s+", "", str(column))
+            for column in area_df.columns
+        ]
+        required_columns = {"廠區", "工程名稱"}
+        if not required_columns.issubset(area_df.columns):
+            continue
+
+        area_df["廠區"] = area_df["廠區"].fillna("").astype(str).str.strip()
+        area_df["工程名稱"] = area_df["工程名稱"].fillna("").astype(str).str.strip()
+        area_df = area_df[
+            area_df["廠區"].ne("") & area_df["工程名稱"].ne("")
+        ].copy()
+        if area_df.empty:
+            continue
+
+        area_df.insert(0, "區域", area_name)
+        for count_column in REPORT_COUNT_COLUMNS:
+            if count_column in area_df.columns:
+                area_df[count_column] = pd.to_numeric(
+                    area_df[count_column], errors="coerce"
+                ).fillna(0)
+        report_frames.append(area_df)
+
+    if not report_frames:
+        return pd.DataFrame()
+    return pd.concat(report_frames, ignore_index=True)
+
+
+def get_report_entry_worksheet():
+    """取得報告新增資料分頁；不存在時自動建立並設定完成率格式。"""
+    worksheet_created = False
+    try:
+        report_worksheet = sh.worksheet(REPORT_ENTRY_WORKSHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        report_worksheet = sh.add_worksheet(
+            title=REPORT_ENTRY_WORKSHEET_NAME,
+            rows=1000,
+            cols=len(REPORT_ENTRY_HEADERS),
+        )
+        worksheet_created = True
+
+    if report_worksheet.col_count < len(REPORT_ENTRY_HEADERS):
+        report_worksheet.resize(cols=len(REPORT_ENTRY_HEADERS))
+    existing_headers = report_worksheet.row_values(1)
+    if not existing_headers:
+        report_worksheet.append_row(REPORT_ENTRY_HEADERS)
+        worksheet_created = True
+    elif existing_headers != REPORT_ENTRY_HEADERS:
+        raise ValueError(
+            f"「{REPORT_ENTRY_WORKSHEET_NAME}」欄位格式不符，請確認標題列。"
+        )
+
+    if worksheet_created:
+        first_month_column = chr(ord("A") + REPORT_ENTRY_HEADERS.index(REPORT_MONTH_COLUMNS[0]))
+        last_month_column = chr(ord("A") + REPORT_ENTRY_HEADERS.index(REPORT_MONTH_COLUMNS[-1]))
+        report_worksheet.format(
+            f"{first_month_column}2:{last_month_column}",
+            {"numberFormat": {"type": "PERCENT", "pattern": "0%"}},
+        )
+    return report_worksheet
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_report_entry_records():
+    """載入由 App 新增、保存在 Google Sheets 的報告資料。"""
+    report_worksheet = get_report_entry_worksheet()
+    report_records = report_worksheet.get_all_records()
+    if not report_records:
+        return pd.DataFrame()
+
+    report_df = pd.DataFrame(report_records)
+    for text_column in ["區域", "廠區", "工程名稱"]:
+        if text_column in report_df.columns:
+            report_df[text_column] = (
+                report_df[text_column].fillna("").astype(str).str.strip()
+            )
+    report_df = report_df[
+        report_df["區域"].ne("")
+        & report_df["廠區"].ne("")
+        & report_df["工程名稱"].ne("")
+    ].copy()
+    for count_column in REPORT_COUNT_COLUMNS:
+        if count_column in report_df.columns:
+            report_df[count_column] = pd.to_numeric(
+                report_df[count_column], errors="coerce"
+            ).fillna(0)
+    return report_df
+
+
+def append_report_entry(
+    area,
+    plant,
+    project,
+    order_count,
+    shipped_count,
+    installed_count,
+    existing_record=None,
+    action="新增",
+):
+    """新增報告快照，並在 Google Sheets 寫入衍生欄位公式。"""
+    report_worksheet = get_report_entry_worksheet()
+    next_row = len(report_worksheet.col_values(1)) + 1
+    current_month = datetime.now().month
+    operator = f"{st.session_state.user_name} ({st.session_state.user_role})"
+    row_values = {
+        "建立時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "建立者": operator,
+        "區域": area,
+        "廠區": plant,
+        "工程名稱": project,
+        "訂單數量": int(order_count),
+        "已出貨": int(shipped_count),
+        "未出貨": f"=F{next_row}-G{next_row}",
+        "已安裝": int(installed_count),
+        "已出貨待安裝": f"=G{next_row}-I{next_row}",
+    }
+    existing_record = existing_record or {}
+    for month_column in REPORT_MONTH_COLUMNS:
+        existing_value = existing_record.get(month_column, "")
+        row_values[month_column] = "" if pd.isna(existing_value) else existing_value
+    if 4 <= current_month <= 12:
+        row_values[f"{current_month}月份完成率"] = (
+            f'=IF(G{next_row}=0,"待料",I{next_row}/G{next_row})'
+        )
+
+    report_worksheet.append_row(
+        [row_values.get(header, "") for header in REPORT_ENTRY_HEADERS],
+        value_input_option="USER_ENTERED",
+        table_range=f"A:{chr(ord('A') + len(REPORT_ENTRY_HEADERS) - 1)}",
+    )
+    load_report_entry_records.clear()
+    try:
+        ws_log.append_row(
+            [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                operator,
+                f"{action}報告資料：{area}／{plant}／{project}",
+                "",
+                f"訂單 {int(order_count)}、已出貨 {int(shipped_count)}、已安裝 {int(installed_count)}",
+            ],
+            table_range="A:E",
+        )
+    except Exception:
+        pass
+
+
+def format_report_completion_rate(value):
+    """將 Excel 完成率小數轉為百分比，並保留「待料」等文字狀態。"""
+    if pd.isna(value) or str(value).strip() == "":
+        return ""
+    if isinstance(value, (int, float)):
+        return f"{float(value):.0%}"
+    return str(value).strip()
+
+
+def render_report_area():
+    """顯示 data.xlsx 的區域、廠區及工程名稱連動搜尋報告。"""
+    st.subheader("📊 報告專區")
+    st.caption("資料來源：data.xlsx；區域、廠區與工程名稱會依序連動篩選。")
+
+    if not REPORT_DATA_FILE.exists():
+        st.error("找不到報告來源 data.xlsx，請確認檔案已放在 app.py 同一資料夾。")
+        return
+
+    try:
+        base_report_df = load_report_data(
+            str(REPORT_DATA_FILE),
+            REPORT_DATA_FILE.stat().st_mtime_ns,
+        )
+        added_report_df = load_report_entry_records()
+        report_df = pd.concat(
+            [frame for frame in [base_report_df, added_report_df] if not frame.empty],
+            ignore_index=True,
+            sort=False,
+        )
+        report_df = report_df.drop_duplicates(
+            subset=["區域", "廠區", "工程名稱"],
+            keep="last",
+        ).reset_index(drop=True)
+    except Exception as e:
+        st.error(f"報告資料讀取失敗：{e}")
+        return
+
+    if report_df.empty:
+        st.info("Excel 中沒有可顯示的工程明細。")
+        return
+
+    if st.session_state.report_flash_message:
+        st.success(st.session_state.report_flash_message)
+        st.session_state.report_flash_message = ""
+
+    with st.expander("➕ 新增報告資料", expanded=False):
+        st.caption(
+            "請輸入基本數量；未出貨、已出貨待安裝及本月份完成率會由 Google Sheets 公式自動計算。"
+        )
+        report_form_key = st.session_state.report_add_form_key
+        add_row1_col1, add_row1_col2, add_row1_col3 = st.columns(3)
+        with add_row1_col1:
+            add_area = st.selectbox(
+                "區域 *",
+                REPORT_AREA_ORDER,
+                key=f"report_add_area_{report_form_key}",
+            )
+        area_plant_options = sorted(
+            {
+                str(value).strip()
+                for value in report_df.loc[report_df["區域"].eq(add_area), "廠區"]
+                if str(value).strip()
+            },
+            key=natural_plant_sort_key,
+        )
+        with add_row1_col2:
+            add_plant = st.selectbox(
+                "廠區 *",
+                area_plant_options,
+                index=None,
+                placeholder="選擇既有廠區或輸入新廠區",
+                accept_new_options=True,
+                key=f"report_add_plant_{report_form_key}_{add_area}",
+            )
+        area_project_options = sorted(
+            {
+                str(value).strip()
+                for value in report_df.loc[
+                    report_df["區域"].eq(add_area)
+                    & (
+                        report_df["廠區"].eq(str(add_plant).strip())
+                        if add_plant else True
+                    ),
+                    "工程名稱",
+                ]
+                if str(value).strip()
+            },
+            key=str.casefold,
+        )
+        with add_row1_col3:
+            add_project = st.selectbox(
+                "工程名稱 *",
+                area_project_options,
+                index=None,
+                placeholder="選擇既有工程或輸入新工程名稱",
+                accept_new_options=True,
+                key=f"report_add_project_{report_form_key}_{add_area}_{str(add_plant)}",
+            )
+
+        add_row2_col1, add_row2_col2, add_row2_col3 = st.columns(3)
+        with add_row2_col1:
+            add_order_count = st.number_input(
+                "訂單數量 *",
+                min_value=0,
+                step=1,
+                key=f"report_add_order_{report_form_key}",
+            )
+        with add_row2_col2:
+            add_shipped_count = st.number_input(
+                "已出貨 *",
+                min_value=0,
+                step=1,
+                key=f"report_add_shipped_{report_form_key}",
+            )
+        with add_row2_col3:
+            add_installed_count = st.number_input(
+                "已安裝 *",
+                min_value=0,
+                step=1,
+                key=f"report_add_installed_{report_form_key}",
+            )
+
+        if st.button(
+            "儲存報告資料",
+            type="primary",
+            use_container_width=True,
+            key=f"report_add_submit_{report_form_key}",
+        ):
+            cleaned_plant = str(add_plant or "").strip()
+            cleaned_project = str(add_project or "").strip()
+            if not cleaned_plant or not cleaned_project:
+                st.error("請輸入廠區與工程名稱。")
+            elif add_shipped_count > add_order_count:
+                st.error("已出貨數量不可大於訂單數量。")
+            elif add_installed_count > add_shipped_count:
+                st.error("已安裝數量不可大於已出貨數量。")
+            else:
+                try:
+                    with st.spinner("正在儲存報告資料並建立公式..."):
+                        append_report_entry(
+                            add_area,
+                            cleaned_plant,
+                            cleaned_project,
+                            add_order_count,
+                            add_shipped_count,
+                            add_installed_count,
+                        )
+                    st.session_state.report_flash_message = (
+                        f"已新增：{add_area}／{cleaned_plant}／{cleaned_project}。"
+                    )
+                    st.session_state.report_add_form_key += 1
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"報告資料新增失敗：{e}")
+
+    with st.expander("✏️ 修改報告資料", expanded=False):
+        st.caption("依序選擇區域、廠區與工程名稱後，系統會自動帶入目前數量。")
+        edit_form_key = st.session_state.report_edit_form_key
+        edit_select_col1, edit_select_col2, edit_select_col3 = st.columns(3)
+        with edit_select_col1:
+            edit_area = st.selectbox(
+                "選擇區域",
+                REPORT_AREA_ORDER,
+                key=f"report_edit_area_{edit_form_key}",
+            )
+        edit_plant_options = sorted(
+            report_df.loc[report_df["區域"].eq(edit_area), "廠區"]
+            .dropna().astype(str).unique(),
+            key=natural_plant_sort_key,
+        )
+        with edit_select_col2:
+            edit_plant = st.selectbox(
+                "選擇廠區",
+                edit_plant_options,
+                index=0 if edit_plant_options else None,
+                placeholder="此區域沒有廠區資料",
+                key=f"report_edit_plant_{edit_form_key}_{edit_area}",
+            )
+        edit_project_options = sorted(
+            report_df.loc[
+                report_df["區域"].eq(edit_area)
+                & report_df["廠區"].eq(str(edit_plant or "")),
+                "工程名稱",
+            ].dropna().astype(str).unique(),
+            key=str.casefold,
+        )
+        with edit_select_col3:
+            edit_project = st.selectbox(
+                "選擇工程名稱",
+                edit_project_options,
+                index=0 if edit_project_options else None,
+                placeholder="此廠區沒有工程資料",
+                key=f"report_edit_project_{edit_form_key}_{edit_area}_{str(edit_plant)}",
+            )
+
+        selected_report_rows = report_df[
+            report_df["區域"].eq(edit_area)
+            & report_df["廠區"].eq(str(edit_plant or ""))
+            & report_df["工程名稱"].eq(str(edit_project or ""))
+        ]
+        if selected_report_rows.empty:
+            st.info("請先選擇一筆工程資料。")
+        else:
+            selected_report_record = selected_report_rows.iloc[-1]
+            selected_identity = hashlib.sha256(
+                f"{edit_area}|{edit_plant}|{edit_project}|{edit_form_key}".encode("utf-8")
+            ).hexdigest()[:12]
+            edit_count_col1, edit_count_col2, edit_count_col3 = st.columns(3)
+            with edit_count_col1:
+                edited_order_count = st.number_input(
+                    "訂單數量 *",
+                    min_value=0,
+                    value=int(selected_report_record.get("訂單數量", 0) or 0),
+                    step=1,
+                    key=f"report_edit_order_{selected_identity}",
+                )
+            with edit_count_col2:
+                edited_shipped_count = st.number_input(
+                    "已出貨 *",
+                    min_value=0,
+                    value=int(selected_report_record.get("已出貨", 0) or 0),
+                    step=1,
+                    key=f"report_edit_shipped_{selected_identity}",
+                )
+            with edit_count_col3:
+                edited_installed_count = st.number_input(
+                    "已裝機 *",
+                    min_value=0,
+                    value=int(selected_report_record.get("已安裝", 0) or 0),
+                    step=1,
+                    key=f"report_edit_installed_{selected_identity}",
+                )
+
+            if st.button(
+                "儲存報告修改",
+                type="primary",
+                use_container_width=True,
+                key=f"report_edit_submit_{selected_identity}",
+            ):
+                if edited_shipped_count > edited_order_count:
+                    st.error("已出貨數量不可大於訂單數量。")
+                elif edited_installed_count > edited_shipped_count:
+                    st.error("已裝機數量不可大於已出貨數量。")
+                else:
+                    try:
+                        with st.spinner("正在儲存修改並重新建立公式..."):
+                            append_report_entry(
+                                edit_area,
+                                str(edit_plant),
+                                str(edit_project),
+                                edited_order_count,
+                                edited_shipped_count,
+                                edited_installed_count,
+                                existing_record=selected_report_record.to_dict(),
+                                action="修改",
+                            )
+                        st.session_state.report_flash_message = (
+                            f"已更新：{edit_area}／{edit_plant}／{edit_project}。"
+                        )
+                        st.session_state.report_edit_form_key += 1
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"報告資料修改失敗：{e}")
+
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    available_areas = [
+        area_name
+        for area_name in REPORT_AREA_ORDER
+        if area_name in set(report_df["區域"].astype(str))
+    ]
+    with filter_col1:
+        selected_area = st.selectbox(
+            "區域",
+            ["（全部）", *available_areas],
+            key="report_search_area",
+        )
+
+    area_filtered_df = report_df[
+        report_df["區域"].eq(selected_area)
+    ].copy() if selected_area != "（全部）" else report_df.copy()
+    available_plants = sorted(
+        area_filtered_df["廠區"].dropna().astype(str).unique(),
+        key=natural_plant_sort_key,
+    )
+    with filter_col2:
+        selected_plant = st.selectbox(
+            "廠區",
+            ["（全部）", *available_plants],
+            key="report_search_plant",
+        )
+
+    plant_filtered_df = area_filtered_df[
+        area_filtered_df["廠區"].eq(selected_plant)
+    ].copy() if selected_plant != "（全部）" else area_filtered_df.copy()
+    available_projects = sorted(
+        plant_filtered_df["工程名稱"].dropna().astype(str).unique(),
+        key=str.casefold,
+    )
+    with filter_col3:
+        selected_project = st.selectbox(
+            "工程名稱",
+            ["（全部）", *available_projects],
+            key="report_search_project",
+        )
+
+    filtered_df = plant_filtered_df[
+        plant_filtered_df["工程名稱"].eq(selected_project)
+    ].copy() if selected_project != "（全部）" else plant_filtered_df.copy()
+
+    metric_values = {}
+    for count_column in REPORT_COUNT_COLUMNS:
+        metric_values[count_column] = int(
+            pd.to_numeric(filtered_df.get(count_column, 0), errors="coerce").fillna(0).sum()
+        )
+    metric_columns = st.columns(5)
+    metric_labels = ["訂單數量", "已出貨", "未出貨", "已安裝", "已出貨待安裝"]
+    for metric_column, metric_label in zip(metric_columns, metric_labels):
+        with metric_column:
+            st.metric(metric_label, f"{metric_values[metric_label]:,} 台")
+
+    display_df = filtered_df.copy()
+    report_month_columns = [
+        column for column in display_df.columns
+        if column.endswith("月份完成率")
+    ]
+    for month_column in report_month_columns:
+        display_df[month_column] = display_df[month_column].apply(
+            format_report_completion_rate
+        )
+    for count_column in REPORT_COUNT_COLUMNS:
+        if count_column in display_df.columns:
+            display_df[count_column] = display_df[count_column].astype(int)
+
+    preferred_columns = [
+        "區域", "廠區", "工程名稱",
+        *REPORT_COUNT_COLUMNS,
+        *report_month_columns,
+    ]
+    display_columns = [
+        column for column in preferred_columns
+        if column in display_df.columns
+    ]
+    st.markdown(f"#### 搜尋結果（{len(display_df)} 筆工程）")
+    st.dataframe(
+        display_df[display_columns],
+        hide_index=True,
+        use_container_width=True,
+        height=min(700, 80 + max(len(display_df), 1) * 35),
+    )
+
+    render_installation_excel_version_area()
 
 
 def installation_record_source_key(prefix, record, row_number=None):
@@ -926,7 +1456,7 @@ def sync_dev_data_to_google():
             record.get("建立時間", sync_time),
             "",
             record.get("建立者", operator),
-            "", "", "", "", "", "", "", "",
+            "", record.get("案件", ""), "", "", "", "", "", "",
             record.get("訂單", ""),
             record.get("品號", ""),
             record.get("附件檔名", ""),
@@ -1050,6 +1580,7 @@ def load_latest_dev_data_from_google():
                 "建立時間": str(row.get("操作時間", "")).strip(),
                 "訂單": str(row.get("訂單", "")).strip(),
                 "品號": str(row.get("品號", "")).strip(),
+                "案件": str(row.get("案件", "")).strip(),
                 "附件檔名": str(row.get("附件檔名", "")).strip(),
                 "附件連結": str(row.get("附件連結", "")).strip(),
                 "附件ID": str(row.get("附件ID", "")).strip(),
@@ -1223,6 +1754,28 @@ def render_development_delete_button(record_index, key_prefix):
         st.rerun()
 
 
+def find_matching_case_name(case_name):
+    """以去除前後空白且不分英文字母大小寫的方式尋找既有案件。"""
+    cleaned_name = str(case_name or "").strip()
+    if not cleaned_name:
+        return ""
+    normalized_name = cleaned_name.casefold()
+    return next(
+        (
+            existing_name
+            for existing_name in st.session_state.dev_case_options
+            if str(existing_name).strip().casefold() == normalized_name
+        ),
+        "",
+    )
+
+
+def queue_checklist_navigation(case_name):
+    """安排下一次重跑時切換到指定案件的確認項目設定。"""
+    st.session_state.dev_checklist_navigation_case = str(case_name or "").strip()
+    st.session_state.dev_option_manager_key += 1
+
+
 def render_sales_area():
     """顯示業務資料輸入；呼叫前必須先完成業務專區權限判斷。"""
     st.markdown("### 業務專區")
@@ -1365,6 +1918,7 @@ def render_development_area(can_upload, can_download):
                             "建立時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "訂單": selected_development_order,
                             "品號": selected_development_part,
+                            "案件": "",
                             "附件檔名": uploaded_drive_file["原始檔名"],
                             "附件連結": uploaded_drive_file["連結"],
                             "附件ID": uploaded_drive_file["id"],
@@ -2423,8 +2977,6 @@ def render_installation_confirmation_area(can_download):
     st.markdown("### 裝機確認區")
     st.caption("此區只顯示背鍋俠已確認的訂單、品號與開發附件。")
 
-    render_installation_excel_version_area()
-
     confirmed_records = [
         (index, record)
         for index, record in enumerate(st.session_state.dev_development_records)
@@ -2438,6 +2990,7 @@ def render_installation_confirmation_area(can_download):
         {
             "訂單": record.get("訂單", ""),
             "品號": record.get("品號", ""),
+            "案件名稱": record.get("案件", ""),
             "附件檔名": record.get("附件檔名", ""),
             "背鍋俠確認時間": record.get("背鍋俠確認時間", ""),
             "背鍋俠確認人": record.get("背鍋俠確認人", ""),
@@ -2459,6 +3012,69 @@ def render_installation_confirmation_area(can_download):
             else:
                 st.write(f"📎 {attachment_name or '（無附件名稱）'}")
                 st.caption("目前帳號沒有下載附件的權限。")
+
+            current_case = str(record.get("案件", "")).strip()
+            matched_current_case = find_matching_case_name(current_case)
+            case_options = list(st.session_state.dev_case_options)
+            case_default_index = None
+            if matched_current_case in case_options:
+                case_default_index = case_options.index(matched_current_case)
+            assigned_case = st.selectbox(
+                "案件名稱 *",
+                case_options,
+                index=case_default_index,
+                placeholder="選擇既有案件或直接輸入新案件名稱",
+                accept_new_options=True,
+                help="可替已確認資料補上或修改案件名稱；同名案件會帶入既有確認項目。",
+                key=f"installation_case_{record_index}",
+            )
+            cleaned_case = str(assigned_case or "").strip()
+            matched_case = find_matching_case_name(cleaned_case)
+            if matched_case:
+                matched_items = st.session_state.dev_case_checklists.get(matched_case, [])
+                st.success(
+                    f"找到同名案件「{matched_case}」，目前有 {len(matched_items)} 行確認項目設定。"
+                )
+                if matched_items:
+                    with st.expander("預覽既有確認項目", expanded=False):
+                        st.text("\n".join(matched_items))
+            elif cleaned_case:
+                st.info(f"尚無案件「{cleaned_case}」，確認後會建立新案件。")
+
+            if st.button(
+                "✅ 確認案件名稱並設定確認項目",
+                type="primary",
+                use_container_width=True,
+                disabled=not bool(cleaned_case),
+                key=f"installation_checklist_{record_index}",
+            ):
+                if not st.session_state.get("user_permissions", {}).get(
+                    "handoff_access",
+                    st.session_state.get("user_role") == "管理者",
+                ):
+                    st.error("目前帳號沒有設定裝機確認案件的權限。")
+                else:
+                    final_case = matched_case or cleaned_case
+                    if not matched_case:
+                        st.session_state.dev_case_options.append(final_case)
+                        st.session_state.dev_case_options = sorted(
+                            set(st.session_state.dev_case_options)
+                        )
+                        st.session_state.dev_case_checklists.setdefault(final_case, [])
+                    record["案件"] = final_case
+                    action_message = (
+                        f"已將裝機確認資料指定為案件「{final_case}」："
+                        f"訂單「{record.get('訂單', '')}」、品號「{record.get('品號', '')}」"
+                    )
+                    queue_dev_auto_sync(action_message)
+                    log_dev_delete_action(
+                        action_message,
+                        current_case or "未命名",
+                        final_case,
+                    )
+                    queue_checklist_navigation(final_case)
+                    st.rerun()
+            render_development_delete_button(record_index, "installation_confirmation")
 
 # ===================================================================
 # ==================== 2. 登入系統與權限驗證 ====================
@@ -3518,11 +4134,13 @@ if can_access_sales and not can_edit:
 if can_access_development and not can_edit:
     tab_specs.append(("development", "🛠️ 開發專區"))
 if can_edit:
+    tab_specs.append(("report", "📊 報告專區"))
     tab_specs.append(("dev_admin", "🧪 開發測試區"))
 
 tabs = st.tabs([label for _, label in tab_specs])
 tab_map = {tab_key: tab for (tab_key, _), tab in zip(tab_specs, tabs)}
 tab1 = tab_map["morning"]
+tab_report = tab_map.get("report")
 tab2 = tab_map["add"]
 tab3 = tab_map["search"]
 tab4 = tab_map["tracking"]
@@ -3571,6 +4189,11 @@ with tab1:
                 show_details_dialog(filtered_df.iloc[selected_idx], 'tab1_grid_key')
         else:
             st.info(f"📅 該日尚無裝機紀錄。")
+
+# ==================== 管理員專屬：報告專區 ====================
+if can_edit and tab_report is not None:
+    with tab_report:
+        render_report_area()
 
 # ==================== 分頁 2：新增裝機紀錄 ====================
 with tab2:
@@ -3900,6 +4523,13 @@ if can_edit and tab_dev is not None:
         except Exception as e:
             st.error(f"新版裝機資料庫初始化失敗：{e}")
 
+        requested_checklist_case = str(
+            st.session_state.dev_checklist_navigation_case or ""
+        ).strip()
+        if requested_checklist_case:
+            # 清除舊的分頁選擇，讓 default 能可靠地導向確認項目管理頁。
+            st.session_state.pop("dev_active_tab", None)
+
         (
             dev_form_tab,
             dev_options_tab,
@@ -3918,7 +4548,11 @@ if can_edit and tab_dev is not None:
             "✅ 裝機確認區",
             "📋 新版搜尋與修改",
             "📥 Excel 匯出",
-        ], key="dev_active_tab", on_change="rerun")
+        ],
+            default="⚙️ 下拉選項管理" if requested_checklist_case else None,
+            key="dev_active_tab",
+            on_change="rerun",
+        )
 
         with dev_handoff_tab:
             render_handoff_area(can_download_attachment)
@@ -4378,20 +5012,28 @@ if can_edit and tab_dev is not None:
                     else:
                         st.info(f"目前沒有{title}選項，請先新增。")
 
-            render_option_manager("廠別", "dev_plant_options", "dev_plant")
-            render_option_manager("案件", "dev_case_options", "dev_case")
-
             with st.container(border=True):
                 st.markdown("#### 案件確認項目")
                 st.caption("使用 [主分類] 與 [[子分類]] 建立階層；分類只供整理，不需勾選。")
 
+                if requested_checklist_case:
+                    st.success(f"目前正在設定案件「{requested_checklist_case}」的確認項目。")
+
                 if st.session_state.dev_case_options:
                     checklist_manager_key = st.session_state.dev_option_manager_key
+                    checklist_default_index = 0
+                    if requested_checklist_case in st.session_state.dev_case_options:
+                        checklist_default_index = st.session_state.dev_case_options.index(
+                            requested_checklist_case
+                        )
                     checklist_case = st.selectbox(
                         "選擇案件",
                         st.session_state.dev_case_options,
+                        index=checklist_default_index,
                         key=f"dev_checklist_case_{checklist_manager_key}",
                     )
+                    if requested_checklist_case:
+                        st.session_state.dev_checklist_navigation_case = ""
                     checklist_case_index = st.session_state.dev_case_options.index(checklist_case)
                     existing_checklist = st.session_state.dev_case_checklists.get(checklist_case, [])
                     checklist_text = st.text_area(
@@ -4418,6 +5060,9 @@ if can_edit and tab_dev is not None:
                         st.rerun()
                 else:
                     st.info("請先新增案件，才能設定確認項目。")
+
+            render_option_manager("廠別", "dev_plant_options", "dev_plant")
+            render_option_manager("案件", "dev_case_options", "dev_case")
 
         with dev_sales_tab:
             st.markdown("### 業務專區")
@@ -4554,6 +5199,7 @@ if can_edit and tab_dev is not None:
                                     "建立時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                     "訂單": selected_development_order,
                                     "品號": selected_development_part,
+                                    "案件": "",
                                     "附件檔名": uploaded_drive_file["原始檔名"],
                                     "附件連結": uploaded_drive_file["連結"],
                                     "附件ID": uploaded_drive_file["id"],
@@ -4688,21 +5334,22 @@ if can_edit and tab_dev is not None:
                     or str(record.get("廠別", "")).strip() == dev_search_plant
                 ]
                 with search_row1_col3:
-                    dev_search_cases = ["（全部）"] + sorted({
+                    dev_search_cases = sorted({
                         str(record.get("案件", "")).strip()
                         for record in plant_filtered_records
                         if str(record.get("案件", "")).strip()
                     })
-                    dev_search_case = st.selectbox(
-                        "案件",
+                    dev_search_case = st.multiselect(
+                        "案件（可多選）",
                         dev_search_cases,
-                        key="dev_results_search_case",
+                        placeholder="未選擇代表全部案件",
+                        key="dev_results_search_cases_multi",
                     )
 
                 case_filtered_records = [
                     record for record in plant_filtered_records
-                    if dev_search_case == "（全部）"
-                    or str(record.get("案件", "")).strip() == dev_search_case
+                    if not dev_search_case
+                    or str(record.get("案件", "")).strip() in dev_search_case
                 ]
                 search_row2_col1, search_row2_col2, search_row2_col3 = st.columns(3)
                 with search_row2_col1:
@@ -4748,8 +5395,8 @@ if can_edit and tab_dev is not None:
                     ):
                         continue
                     if (
-                        dev_search_case != "（全部）"
-                        and str(record.get("案件", "")).strip() != dev_search_case
+                        dev_search_case
+                        and str(record.get("案件", "")).strip() not in dev_search_case
                     ):
                         continue
                     if (
