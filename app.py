@@ -95,6 +95,12 @@ if 'installation_unrecorded_flash' not in st.session_state:
     st.session_state.installation_unrecorded_flash = ""
 if 'dev_results_grid_key' not in st.session_state:
     st.session_state.dev_results_grid_key = 0
+if 'custom_case_confirmation_grid_key' not in st.session_state:
+    st.session_state.custom_case_confirmation_grid_key = 0
+if 'custom_case_setup_record_id' not in st.session_state:
+    st.session_state.custom_case_setup_record_id = ""
+if 'custom_case_return_to_confirmation' not in st.session_state:
+    st.session_state.custom_case_return_to_confirmation = False
 if 'dev_results_edit_form_key' not in st.session_state:
     st.session_state.dev_results_edit_form_key = 0
 if 'new_installation_migration_checked' not in st.session_state:
@@ -203,6 +209,9 @@ NEW_INSTALLATION_HEADERS = [
     "照片連結",
     "照片ID",
 ]
+CUSTOM_CASE_PENDING_SOURCE = "新版輸入-其他案件待確認"
+CUSTOM_CASE_SETUP_SOURCE = "新版輸入-其他案件待設定"
+CUSTOM_CASE_CONFIRMED_SOURCE = "新版輸入-其他案件已確認"
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -2955,57 +2964,61 @@ def render_unrecorded_installation_items_panel():
         )
         for category in category_order
     }
-    category_tabs = st.tabs([
-        f"{category}（{category_counts[category]}）"
-        for category in category_order
-    ])
+    active_category = st.segmented_control(
+        "差異分類",
+        category_order,
+        default=category_order[0],
+        format_func=lambda category: f"{category}（{category_counts[category]}）",
+        key="installation_unrecorded_active_category",
+        width="stretch",
+    )
+    if active_category not in category_order:
+        active_category = category_order[0]
+    category_items = [
+        item
+        for item in unrecorded_items
+        if item["差異分類"] == active_category
+    ]
     selected_rows = []
-    for category, category_tab in zip(category_order, category_tabs):
-        with category_tab:
-            category_items = [
-                item
-                for item in unrecorded_items
-                if item["差異分類"] == category
-            ]
-            if not category_items:
-                st.info(f"目前沒有未紀錄的{category}。")
-                continue
-            editor_rows = []
-            for item in category_items:
-                editor_rows.append({
-                    "勾選": False,
-                    "工作表列": item["工作表列"],
-                    "比較時間": item["比較時間"],
-                    "來源檔案": item["來源檔案"],
-                    "訂單": item["訂單"],
-                    "客戶簡稱": item["客戶簡稱"],
-                    "業務員名稱": item["業務員名稱"],
-                    "品號": item["品號"],
-                    "品名": item["品名"],
-                    "訂單數量": item["訂單數量"],
-                    "未交數量": item["未交數量"],
-                    "已交數量": item["已交數量"],
-                    "數量變更內容": item["數量變更內容"],
-                    "狀態": item["紀錄狀態"],
-                })
-            editor_df = pd.DataFrame(editor_rows)
-            edited_df = st.data_editor(
-                editor_df,
-                hide_index=True,
-                use_container_width=True,
-                disabled=[column for column in editor_df.columns if column != "勾選"],
-                column_config={
-                    "勾選": st.column_config.CheckboxColumn("勾選", default=False),
-                    "工作表列": None,
-                },
-                key=(
-                    f"installation_unrecorded_editor_{category}_"
-                    f"{st.session_state.installation_unrecorded_grid_key}"
-                ),
-            )
-            selected_rows.extend(
-                edited_df.loc[edited_df["勾選"], "工作表列"].tolist()
-            )
+    if not category_items:
+        st.info(f"目前沒有未紀錄的{active_category}。")
+    else:
+        editor_rows = []
+        for item in category_items:
+            editor_rows.append({
+                "勾選": False,
+                "工作表列": item["工作表列"],
+                "比較時間": item["比較時間"],
+                "來源檔案": item["來源檔案"],
+                "訂單": item["訂單"],
+                "客戶簡稱": item["客戶簡稱"],
+                "業務員名稱": item["業務員名稱"],
+                "品號": item["品號"],
+                "品名": item["品名"],
+                "訂單數量": item["訂單數量"],
+                "未交數量": item["未交數量"],
+                "已交數量": item["已交數量"],
+                "數量變更內容": item["數量變更內容"],
+                "狀態": item["紀錄狀態"],
+            })
+        editor_df = pd.DataFrame(editor_rows)
+        edited_df = st.data_editor(
+            editor_df,
+            hide_index=True,
+            use_container_width=True,
+            disabled=[column for column in editor_df.columns if column != "勾選"],
+            column_config={
+                "勾選": st.column_config.CheckboxColumn("勾選", default=False),
+                "工作表列": None,
+            },
+            key=(
+                f"installation_unrecorded_editor_{active_category}_"
+                f"{st.session_state.installation_unrecorded_grid_key}"
+            ),
+        )
+        selected_rows = edited_df.loc[
+            edited_df["勾選"], "工作表列"
+        ].tolist()
     if st.button(
         f"✅ 將選取的 {len(selected_rows)} 筆改為已記錄",
         type="primary",
@@ -3377,16 +3390,30 @@ def render_installation_excel_version_area():
 
 
 def render_installation_confirmation_area(can_download):
-    """只顯示已由背鍋俠確認的開發資料。"""
+    """顯示已交接的開發附件與新版輸入的其他案件。"""
     st.markdown("### 裝機確認區")
-    st.caption("此區只顯示背鍋俠已確認的訂單、品號與開發附件。")
+    st.caption("此區顯示背鍋俠已確認的開發附件，以及新版裝機輸入的其他案件。")
 
     confirmed_records = [
         (index, record)
         for index, record in enumerate(st.session_state.dev_development_records)
         if str(record.get("背鍋俠確認時間", "")).strip()
     ]
-    if not confirmed_records:
+    custom_case_records = sorted(
+        [
+            record
+            for record in load_new_installation_records()
+            if str(record.get("來源版本", "")).strip()
+            in {CUSTOM_CASE_PENDING_SOURCE, CUSTOM_CASE_SETUP_SOURCE}
+        ],
+        key=lambda record: (
+            str(record.get("更新時間", "")),
+            str(record.get("建立時間", "")),
+            str(record.get("紀錄ID", "")),
+        ),
+        reverse=True,
+    )
+    if not confirmed_records and not custom_case_records:
         st.info("目前沒有已確認的裝機資料。")
         return
 
@@ -3401,7 +3428,10 @@ def render_installation_confirmation_area(can_download):
         }
         for _, record in confirmed_records
     ])
-    st.dataframe(installation_df, hide_index=True, use_container_width=True)
+    if confirmed_records:
+        st.dataframe(installation_df, hide_index=True, use_container_width=True)
+    else:
+        st.info("目前沒有背鍋俠已確認的開發附件。")
 
     for record_index, record in reversed(confirmed_records):
         with st.expander(
@@ -3479,6 +3509,60 @@ def render_installation_confirmation_area(can_download):
                     queue_checklist_navigation(final_case)
                     st.rerun()
             render_development_delete_button(record_index, "installation_confirmation")
+
+    st.divider()
+    st.markdown("#### 新版裝機的其他案件")
+    st.caption("勾選一筆案件後，可調整案件名稱、代入既有確認項目，並決定是否前往項目確認設定。")
+    if not custom_case_records:
+        st.info("目前沒有等待確認的其他案件。")
+        if st.session_state.custom_case_return_to_confirmation:
+            st.session_state.custom_case_setup_record_id = ""
+            st.session_state.custom_case_return_to_confirmation = False
+    else:
+        custom_case_df = pd.DataFrame([
+            {
+                "建立時間": record.get("建立時間", ""),
+                "裝機日期": record.get("日期", ""),
+                "廠別": record.get("廠別", ""),
+                "案件名稱": record.get("案件", ""),
+                "機台名稱": record.get("機台名稱", ""),
+                "狀態": (
+                    "待建立確認項目"
+                    if record.get("來源版本") == CUSTOM_CASE_SETUP_SOURCE
+                    else "待確認案件"
+                ),
+            }
+            for record in custom_case_records
+        ])
+        custom_case_event = st.dataframe(
+            custom_case_df,
+            hide_index=True,
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=(
+                "custom_case_confirmation_grid_"
+                f"{st.session_state.custom_case_confirmation_grid_key}"
+            ),
+        )
+        selected_custom_record = None
+        if custom_case_event.selection.rows:
+            selected_index = custom_case_event.selection.rows[0]
+            selected_custom_record = dict(custom_case_records[selected_index])
+        elif st.session_state.custom_case_return_to_confirmation:
+            resume_record_id = str(
+                st.session_state.custom_case_setup_record_id
+            )
+            selected_custom_record = next(
+                (
+                    dict(record)
+                    for record in custom_case_records
+                    if str(record.get("紀錄ID", "")) == resume_record_id
+                ),
+                None,
+            )
+        if selected_custom_record:
+            show_custom_case_confirmation_dialog(selected_custom_record)
 
 # ===================================================================
 # ==================== 2. 登入系統與權限驗證 ====================
@@ -4169,7 +4253,7 @@ def render_installation_photo_popover(row_data, installation_photos):
 
 
 @st.dialog("📝 詳細資料檢視", on_dismiss=reset_dialog_selection)
-def show_details_dialog(row_data, reset_key):
+def show_details_dialog(row_data, reset_key, allow_status_edit=False):
     st.session_state.active_dialog_reset_key = reset_key
     data_source = str(row_data.get("資料來源", "")).strip()
     if data_source:
@@ -4218,10 +4302,274 @@ def show_details_dialog(row_data, reset_key):
         f"<div style='font-size: 1.3em; line-height: 1.6; background-color: #f0f2f6; padding: 15px; border-radius: 8px; color: #333; margin-bottom: 20px;'>{remark_text}</div>",
         unsafe_allow_html=True
     )
+
+    if allow_status_edit:
+        st.markdown("---")
+        st.markdown("### ✏️ 修改狀態")
+        if st.session_state.get("user_role") != "管理者":
+            st.info("狀態修改僅限管理者操作。")
+        else:
+            current_status = str(row_data.get("狀態", "")).strip()
+            normalized_status = (
+                "已完成" if current_status in {"完成", "已完成"} else "未完成"
+            )
+            record_key = hashlib.sha256(
+                (
+                    f"{row_data.get('資料來源', '')}|"
+                    f"{row_data.get('紀錄ID', '')}|"
+                    f"{row_data.get('來源鍵', '')}|"
+                    f"{row_data.get('Sheet_Row', '')}"
+                ).encode("utf-8")
+            ).hexdigest()[:12]
+            edited_status = st.selectbox(
+                "狀態",
+                ["未完成", "已完成"],
+                index=0 if normalized_status == "未完成" else 1,
+                key=f"dev_detail_status_{record_key}",
+            )
+            current_reason = str(
+                row_data.get("未完成或缺貨原因", "")
+            ).strip()
+            edited_reason = ""
+            if edited_status == "未完成":
+                edited_reason = st.text_area(
+                    "未完成原因 *",
+                    value=current_reason,
+                    height=100,
+                    key=f"dev_detail_reason_{record_key}",
+                )
+
+            if st.button(
+                "儲存狀態修改",
+                type="primary",
+                use_container_width=True,
+                key=f"dev_detail_status_save_{record_key}",
+            ):
+                if edited_status == "未完成" and not edited_reason.strip():
+                    st.error("狀態為未完成時，請填寫未完成原因。")
+                else:
+                    old_record = dict(row_data)
+                    updated_record = dict(row_data)
+                    updated_record.update({
+                        "狀態": edited_status,
+                        "未完成或缺貨原因": (
+                            edited_reason.strip()
+                            if edited_status == "未完成"
+                            else ""
+                        ),
+                    })
+                    try:
+                        if str(row_data.get("_record_version", "")) == "legacy":
+                            updated_record["來源版本"] = "舊版轉換"
+                            updated_record["來源鍵"] = row_data.get("來源鍵", "")
+                            saved_record_id = append_new_installation_record(updated_record)
+                            action_message = (
+                                "已將舊版裝機紀錄轉為新版並更新狀態："
+                                f"{updated_record.get('廠別', '')}／"
+                                f"{updated_record.get('案件', '')}／"
+                                f"{updated_record.get('機台名稱', '')} → {edited_status}"
+                            )
+                        else:
+                            update_new_installation_record(old_record, updated_record)
+                            saved_record_id = row_data.get("紀錄ID", "")
+                            action_message = (
+                                "已更新新版裝機紀錄狀態："
+                                f"{updated_record.get('廠別', '')}／"
+                                f"{updated_record.get('案件', '')}／"
+                                f"{updated_record.get('機台名稱', '')} → {edited_status}"
+                            )
+
+                        related_completed_count = 0
+                        if edited_status == "已完成":
+                            related_completed_count = complete_matching_new_installation_records(
+                                updated_record,
+                                exclude_record_id=saved_record_id,
+                            )
+                        if related_completed_count:
+                            action_message += (
+                                f"，並完成 {related_completed_count} 筆相同機台的新版紀錄"
+                            )
+                        log_dev_delete_action(
+                            action_message,
+                            str(old_record),
+                            str(updated_record),
+                        )
+                        st.session_state.dev_flash_level = "success"
+                        st.session_state.dev_flash_message = action_message
+                        st.session_state.dev_results_grid_key += 1
+                        st.rerun()
+                    except Exception as error:
+                        st.error(f"狀態修改失敗：{error}")
+
+            if str(row_data.get("_record_version", "")) == "new":
+                if st.button(
+                    "🗑️ 刪除此筆新版裝機資料",
+                    use_container_width=True,
+                    disabled=not can_delete_dev_data(),
+                    help="若紀錄包含照片，確認後會一併移至 Google Drive 垃圾桶。",
+                    key=f"dev_detail_delete_{record_key}",
+                ):
+                    st.session_state.dev_pending_delete = {
+                        "type": "installation",
+                        "record": dict(row_data),
+                    }
+                    st.session_state.dev_delete_dialog_key += 1
+                    st.session_state.dev_results_grid_key += 1
+                    st.rerun()
+                if not can_delete_dev_data():
+                    st.caption("目前帳號沒有刪除裝機資料與照片的權限。")
+            else:
+                st.caption("舊版資料不能直接刪除；修改狀態後會另存為新版。")
     
     if st.button("❌ 關閉視窗並取消選取", type="primary", use_container_width=True):
         st.session_state[reset_key] += 1  
         st.rerun()
+
+
+def dismiss_custom_case_confirmation_dialog():
+    reset_dialog_selection()
+    st.session_state.custom_case_setup_record_id = ""
+    st.session_state.custom_case_return_to_confirmation = False
+
+
+@st.dialog("✅ 確認其他案件", on_dismiss=dismiss_custom_case_confirmation_dialog)
+def show_custom_case_confirmation_dialog(record):
+    """確認新版其他案件名稱，並代入或建立案件確認項目。"""
+    st.session_state.active_dialog_reset_key = "custom_case_confirmation_grid_key"
+    if not st.session_state.get("user_permissions", {}).get(
+        "installation_access",
+        st.session_state.get("user_role") == "管理者",
+    ):
+        st.error("目前帳號沒有設定裝機確認案件的權限。")
+        return
+
+    current_case = str(record.get("案件", "")).strip()
+    st.markdown(f"**廠別：** {record.get('廠別', '')}")
+    st.markdown(f"**機台名稱：** {record.get('機台名稱', '')}")
+    st.markdown(f"**目前案件名稱：** {current_case or '未命名'}")
+
+    case_options = list(st.session_state.dev_case_options)
+    matched_current_case = find_matching_case_name(current_case)
+    if current_case and not matched_current_case:
+        case_options.append(current_case)
+    case_options = list(dict.fromkeys(case_options))
+    default_case = matched_current_case or current_case
+    default_index = (
+        case_options.index(default_case)
+        if default_case in case_options
+        else None
+    )
+    assigned_case = st.selectbox(
+        "案件名稱 *",
+        case_options,
+        index=default_index,
+        placeholder="選擇既有案件或直接輸入新案件名稱",
+        accept_new_options=True,
+        help="可修改案件名稱；選擇既有案件時會代入該案件的確認項目。",
+        key=f"custom_case_assignment_{record.get('紀錄ID', '')}",
+    )
+    cleaned_case = str(assigned_case or "").strip()
+    matched_case = find_matching_case_name(cleaned_case)
+    final_case = matched_case or cleaned_case
+    checklist_lines = st.session_state.dev_case_checklists.get(final_case, [])
+    checklist_labels = get_checklist_export_labels(checklist_lines)
+    case_selection_key = hashlib.sha256(
+        f"{record.get('紀錄ID', '')}|{final_case}".encode("utf-8")
+    ).hexdigest()[:12]
+    if matched_case:
+        st.success(
+            f"找到既有案件「{matched_case}」，已載入 {len(checklist_labels)} 個確認項目。"
+        )
+    elif cleaned_case:
+        st.info(f"案件「{cleaned_case}」尚未建立；確認後會新增至案件選項。")
+
+    checklist_results = {}
+    if checklist_lines:
+        st.markdown("#### 選擇這筆裝機的完成項目")
+        st.caption("請依實際狀況自行勾選；勾選代表已施工，未勾選代表待施工。")
+        checklist_results = render_checklist_editor(
+            checklist_lines,
+            str(record.get("項目確認", "")),
+            f"custom_case_checklist_{case_selection_key}",
+        )
+    elif cleaned_case:
+        st.warning("此案件尚無確認項目，請先前往案件確認項目設定。")
+
+    enter_checklist_settings = st.checkbox(
+        "確認後前往『下拉選項管理－案件確認項目』",
+        value=not bool(checklist_labels),
+        key=f"custom_case_enter_settings_{case_selection_key}",
+    )
+    confirm_col, later_col = st.columns(2)
+    with confirm_col:
+        if st.button(
+            "確認案件名稱",
+            type="primary",
+            use_container_width=True,
+            disabled=not bool(cleaned_case),
+            key=f"custom_case_confirm_{record.get('紀錄ID', '')}",
+        ):
+            try:
+                if not matched_case:
+                    st.session_state.dev_case_options.append(final_case)
+                    st.session_state.dev_case_options = sorted(
+                        set(st.session_state.dev_case_options)
+                    )
+                    st.session_state.dev_case_checklists.setdefault(final_case, [])
+
+                updated_record = dict(record)
+                selected_checklist_summary = (
+                    "、".join(
+                        f"{'✅' if checked else '❌'} {item_name}"
+                        for item_name, checked in checklist_results.items()
+                    )
+                    if checklist_results
+                    else "未設定確認項目"
+                )
+                updated_record.update({
+                    "案件": final_case,
+                    "項目確認": selected_checklist_summary,
+                    "來源版本": (
+                        CUSTOM_CASE_SETUP_SOURCE
+                        if enter_checklist_settings or not checklist_results
+                        else CUSTOM_CASE_CONFIRMED_SOURCE
+                    ),
+                })
+                update_new_installation_record(record, updated_record)
+                action_message = (
+                    f"已確認新版其他案件：{current_case or '未命名'} → {final_case}"
+                )
+                queue_dev_auto_sync(action_message)
+                log_dev_delete_action(
+                    action_message,
+                    current_case or "未命名",
+                    final_case,
+                )
+                st.session_state.custom_case_confirmation_grid_key += 1
+                st.session_state.dev_flash_level = "success"
+                st.session_state.dev_flash_message = action_message
+                if enter_checklist_settings:
+                    st.session_state.custom_case_setup_record_id = str(
+                        record.get("紀錄ID", "")
+                    )
+                    st.session_state.custom_case_return_to_confirmation = False
+                    queue_checklist_navigation(final_case)
+                elif checklist_results:
+                    st.session_state.custom_case_setup_record_id = ""
+                    st.session_state.custom_case_return_to_confirmation = False
+                st.rerun()
+            except Exception as error:
+                st.error(f"其他案件確認失敗：{error}")
+    with later_col:
+        if st.button(
+            "稍後處理",
+            use_container_width=True,
+            key=f"custom_case_later_{record.get('紀錄ID', '')}",
+        ):
+            st.session_state.custom_case_setup_record_id = ""
+            st.session_state.custom_case_return_to_confirmation = False
+            st.session_state.custom_case_confirmation_grid_key += 1
+            st.rerun()
 
 
 def dismiss_dev_reason_dialog():
@@ -4830,7 +5178,20 @@ with tab4:
     if not df.empty:
         df = df.fillna("")
         df['Sheet_Row'] = df.index + 2
-        pending_df = df[(df['狀態'].astype(str).str.strip() != '已完成') & (df['狀態'].astype(str).str.strip() != '') & (df['機台名稱'].astype(str).str.strip() != '')]
+        pending_df = df[(df['狀態'].astype(str).str.strip() != '已完成') & (df['狀態'].astype(str).str.strip() != '') & (df['機台名稱'].astype(str).str.strip() != '')].copy()
+        pending_df['_排序日期'] = pd.to_datetime(
+            pending_df['日期'].astype(str).str.strip().str.replace(
+                '/',
+                '-',
+                regex=False,
+            ),
+            errors='coerce',
+        )
+        pending_df = pending_df.sort_values(
+            by=['_排序日期', 'Sheet_Row'],
+            ascending=[False, False],
+            na_position='last',
+        ).drop(columns=['_排序日期'])
         st.markdown(f"**目前待追蹤數量： <span style='color:red;'>{len(pending_df)}</span> 筆**", unsafe_allow_html=True)
         
         if not pending_df.empty:
@@ -4930,8 +5291,12 @@ if can_edit and tab_dev is not None:
         requested_checklist_case = str(
             st.session_state.dev_checklist_navigation_case or ""
         ).strip()
-        if requested_checklist_case:
-            # 清除舊的分頁選擇，讓 default 能可靠地導向確認項目管理頁。
+        return_to_custom_case = bool(
+            st.session_state.custom_case_return_to_confirmation
+            and st.session_state.custom_case_setup_record_id
+        )
+        if requested_checklist_case or return_to_custom_case:
+            # 清除舊的分頁選擇，讓 default 能可靠地導向指定頁面。
             st.session_state.pop("dev_active_tab", None)
 
         (
@@ -4953,7 +5318,11 @@ if can_edit and tab_dev is not None:
             "📋 新版搜尋與修改",
             "📥 Excel 匯出",
         ],
-            default="⚙️ 下拉選項管理" if requested_checklist_case else None,
+            default=(
+                "⚙️ 下拉選項管理"
+                if requested_checklist_case
+                else "✅ 裝機確認區" if return_to_custom_case else None
+            ),
             key="dev_active_tab",
             on_change="rerun",
         )
@@ -4974,23 +5343,45 @@ if can_edit and tab_dev is not None:
                 st.markdown("#### 1. 識別裝機資料")
                 identity_col1, identity_col2, identity_col3 = st.columns(3)
                 with identity_col1:
-                    plant_choices = sorted(
+                    plant_choices = [*sorted(
                         st.session_state.dev_plant_options,
                         key=natural_plant_sort_key,
-                    ) or ["（請先至選項管理新增廠別）"]
-                    identity_plant = st.selectbox(
+                    ), "其他"]
+                    identity_plant_choice = st.selectbox(
                         "廠別 *",
                         plant_choices,
-                        disabled=not st.session_state.dev_plant_options,
                         key=f"dev_identity_plant_{dev_key}",
                     )
+                    custom_plant = ""
+                    if identity_plant_choice == "其他":
+                        custom_plant = st.text_input(
+                            "自行輸入廠別名稱 *",
+                            placeholder="輸入新的廠別名稱",
+                            key=f"dev_identity_custom_plant_{dev_key}",
+                        )
+                    identity_plant = (
+                        custom_plant.strip()
+                        if identity_plant_choice == "其他"
+                        else identity_plant_choice
+                    )
                 with identity_col2:
-                    case_choices = st.session_state.dev_case_options or ["（請先至選項管理新增案件）"]
-                    identity_case = st.selectbox(
+                    case_choices = [*st.session_state.dev_case_options, "其他"]
+                    identity_case_choice = st.selectbox(
                         "案件 *",
                         case_choices,
-                        disabled=not st.session_state.dev_case_options,
                         key=f"dev_identity_case_{dev_key}",
+                    )
+                    custom_case = ""
+                    if identity_case_choice == "其他":
+                        custom_case = st.text_input(
+                            "自行輸入案件名稱 *",
+                            placeholder="輸入新的案件名稱",
+                            key=f"dev_identity_custom_case_{dev_key}",
+                        )
+                    identity_case = (
+                        custom_case.strip()
+                        if identity_case_choice == "其他"
+                        else identity_case_choice
                     )
                 with identity_col3:
                     identity_machine = st.text_input(
@@ -5006,9 +5397,9 @@ if can_edit and tab_dev is not None:
                     key=f"dev_check_identity_{dev_key}",
                 ):
                     identity_missing = []
-                    if not st.session_state.dev_plant_options:
+                    if not identity_plant.strip():
                         identity_missing.append("廠別")
-                    if not st.session_state.dev_case_options:
+                    if not identity_case.strip():
                         identity_missing.append("案件")
                     if not identity_machine.strip():
                         identity_missing.append("機台名稱")
@@ -5020,6 +5411,8 @@ if can_edit and tab_dev is not None:
                             "廠別": identity_plant,
                             "案件": identity_case,
                             "機台名稱": identity_machine.strip(),
+                            "自訂廠別": identity_plant_choice == "其他",
+                            "自訂案件": identity_case_choice == "其他",
                         }
                         target_identity = (
                             identity_plant.strip().casefold(),
@@ -5082,7 +5475,12 @@ if can_edit and tab_dev is not None:
                         st.session_state.dev_checklist_key += 1
                         st.rerun()
 
-                checklist_items = st.session_state.dev_case_checklists.get(loaded_case, [])
+                is_custom_case = bool(identity_data.get("自訂案件"))
+                checklist_items = (
+                    []
+                    if is_custom_case
+                    else st.session_state.dev_case_checklists.get(loaded_case, [])
+                )
                 checklist_key = st.session_state.dev_checklist_key
                 previous_checklist = str(previous_prefill.get("項目確認", ""))
                 status_options = ["未完成", "已完成"]
@@ -5099,7 +5497,12 @@ if can_edit and tab_dev is not None:
 
                     st.markdown("#### 3. 項目確認")
                     checklist_results = {}
-                    if not checklist_items:
+                    if is_custom_case:
+                        st.info(
+                            "此筆使用「其他」案件，本次不需勾選確認項目；"
+                            "儲存後會送至裝機確認區等待案件名稱與確認項目設定。"
+                        )
+                    elif not checklist_items:
                         st.info("此案件尚未設定確認項目，請至「下拉選項管理」新增。")
                     else:
                         checklist_results = render_checklist_editor(
@@ -5254,7 +5657,11 @@ if can_edit and tab_dev is not None:
                                 [photo["id"] for photo in uploaded_photos],
                                 ensure_ascii=False,
                             ) if uploaded_photos else ""
-                            test_record["來源版本"] = "新版輸入"
+                            test_record["來源版本"] = (
+                                CUSTOM_CASE_PENDING_SOURCE
+                                if identity_data.get("自訂案件")
+                                else "新版輸入"
+                            )
                             new_record_id = append_new_installation_record(test_record)
                             record_saved = True
                             if test_record.get("狀態") == "已完成":
@@ -5275,6 +5682,11 @@ if can_edit and tab_dev is not None:
                             st.session_state.dev_flash_message = (
                                 f"已新增至「{NEW_INSTALLATION_WORKSHEET_NAME}」"
                                 f"，並上傳 {len(uploaded_photos)} 張照片。"
+                                + (
+                                    " 此筆其他案件已同步至裝機確認區。"
+                                    if identity_data.get("自訂案件")
+                                    else ""
+                                )
                             )
                             st.rerun()
                         except Exception as e:
@@ -5457,10 +5869,15 @@ if can_edit and tab_dev is not None:
                         cleaned_items = normalize_checklist_definition_lines(checklist_text)
 
                         st.session_state.dev_case_checklists[checklist_case] = cleaned_items
-                        queue_dev_auto_sync(f"已更新案件「{checklist_case}」的確認項目")
+                        action_message = f"已更新案件「{checklist_case}」的確認項目"
+                        queue_dev_auto_sync(action_message)
                         st.session_state.dev_option_manager_key += 1
                         st.session_state.dev_checklist_key += 1
                         st.session_state.dev_add_preview = None
+                        if st.session_state.custom_case_setup_record_id:
+                            st.session_state.custom_case_return_to_confirmation = True
+                            st.session_state.dev_checklist_navigation_case = ""
+                            st.session_state.pop("dev_active_tab", None)
                         st.rerun()
                 else:
                     st.info("請先新增案件，才能設定確認項目。")
@@ -5865,6 +6282,7 @@ if can_edit and tab_dev is not None:
                 if display_results_df.empty:
                     st.info("沒有符合目前搜尋條件的裝機資料。")
                 else:
+                    st.caption("勾選一筆資料可開啟詳細內容；狀態修改僅限管理者操作。")
                     results_event = st.dataframe(
                         display_results_df,
                         hide_index=True,
@@ -5883,230 +6301,11 @@ if can_edit and tab_dev is not None:
                         show_details_dialog(
                             pd.Series(combined_results_records[selected_combined_index]),
                             "dev_results_grid_key",
+                            allow_status_edit=True,
                         )
 
-                    st.markdown("#### 修改裝機資料")
-                    edit_record_options = filtered_record_indices or [None]
-                    edit_record_index = st.selectbox(
-                        "選擇要修改的紀錄",
-                        edit_record_options,
-                        format_func=lambda index: (
-                            "（目前沒有可修改的紀錄）"
-                            if index is None else
-                            f"[{combined_results_records[index].get('資料來源', '')}]｜"
-                            f"{combined_results_records[index].get('日期', '')}｜"
-                            f"{combined_results_records[index].get('廠別', '')}｜"
-                            f"{combined_results_records[index].get('案件', '')}｜"
-                            f"{combined_results_records[index].get('機台名稱', '')}"
-                        ),
-                        disabled=not filtered_record_indices,
-                        key="dev_results_edit_record_v2",
-                    )
-                    edit_record = (
-                        combined_results_records[edit_record_index]
-                        if edit_record_index is not None else {}
-                    )
-                    if edit_record_index is not None:
-                        if edit_record.get("_record_version") == "legacy":
-                            st.info("這是舊版紀錄；儲存後會轉成新版並寫入「新版裝機紀錄」，舊版原始資料不會改動。")
-                        else:
-                            st.caption("這是新版紀錄；儲存後會直接更新新版資料庫。")
-                    parsed_edit_date = pd.to_datetime(edit_record.get("日期", ""), errors="coerce")
-                    edit_date_default = (
-                        parsed_edit_date.date()
-                        if pd.notna(parsed_edit_date)
-                        else datetime.now().date()
-                    )
-                    edit_form_key = st.session_state.dev_results_edit_form_key
-                    edit_case_options = sorted(
-                        set(st.session_state.dev_case_options)
-                        | {str(edit_record.get("案件", "")).strip()}
-                    )
-                    edited_case = st.selectbox(
-                        "案件 *",
-                        edit_case_options,
-                        index=edit_case_options.index(str(edit_record.get("案件", "")).strip()),
-                        key=f"dev_edit_case_{edit_form_key}_{edit_record_index}",
-                        help="切換案件後，下方會立即帶入該案件已建立的確認項目。",
-                    )
-                    edit_checklist_definition = st.session_state.dev_case_checklists.get(
-                        edited_case,
-                        [],
-                    )
-                    with st.form(f"dev_results_edit_form_{edit_form_key}_{edit_record_index}"):
-                        edit_col1, edit_col2, edit_col3 = st.columns(3)
-                        with edit_col1:
-                            edited_date = st.date_input("裝機日期 *", edit_date_default)
-                            edit_plant_options = sorted(
-                                set(st.session_state.dev_plant_options)
-                                | {str(edit_record.get("廠別", "")).strip()},
-                                key=natural_plant_sort_key,
-                            )
-                            edited_plant = st.selectbox(
-                                "廠別 *",
-                                edit_plant_options,
-                                index=edit_plant_options.index(str(edit_record.get("廠別", "")).strip()),
-                            )
-                        with edit_col2:
-                            edited_machine = st.text_input(
-                                "機台名稱 *",
-                                value=str(edit_record.get("機台名稱", "")),
-                            )
-                        with edit_col3:
-                            edited_installers = st.text_input(
-                                "安裝人員",
-                                value=str(edit_record.get("安裝人員", "")),
-                                help="多人請使用頓號「、」分隔。",
-                            )
-                            edit_status_options = ["未完成", "已完成"]
-                            current_edit_status = str(edit_record.get("狀態", "")).strip()
-                            normalized_edit_status = (
-                                "已完成" if current_edit_status in {"完成", "已完成"} else "未完成"
-                            )
-                            edited_status = st.selectbox(
-                                "狀態 *",
-                                edit_status_options,
-                                index=edit_status_options.index(normalized_edit_status),
-                            )
+                    # 修改入口已整合至搜尋結果勾選後的詳細視窗。
 
-                        st.markdown("#### 項目確認")
-                        if edit_checklist_definition:
-                            st.caption(
-                                f"已帶入案件「{edited_case}」的確認項目；勾選代表已施工，未勾選代表待施工。"
-                            )
-                            checklist_current_summary = (
-                                str(edit_record.get("項目確認", ""))
-                                if edited_case == str(edit_record.get("案件", "")).strip()
-                                else ""
-                            )
-                            edited_checklist_results = render_checklist_editor(
-                                edit_checklist_definition,
-                                checklist_current_summary,
-                                f"dev_edit_checklist_{edit_form_key}_{edit_record_index}_{edited_case}",
-                            )
-                            edited_checklist = ""
-                        else:
-                            edited_checklist_results = None
-                            st.info(f"案件「{edited_case}」尚未建立確認項目，暫時保留文字輸入。")
-                            edited_checklist = st.text_area(
-                                "項目確認",
-                                value=str(edit_record.get("項目確認", "")),
-                                height=180,
-                                help="保留每個項目前方的 ✅ 或 ❌，以及完整分類路徑。",
-                            )
-                        edited_reason = st.text_area(
-                            "未完成原因",
-                            value=str(edit_record.get("未完成或缺貨原因", "")),
-                            height=100,
-                        )
-                        edited_remark = st.text_area(
-                            "Remark",
-                            value=str(edit_record.get("Remark", "")),
-                            height=120,
-                        )
-                        edit_submitted = st.form_submit_button(
-                            "儲存修改",
-                            type="primary",
-                            use_container_width=True,
-                            disabled=edit_record_index is None,
-                        )
-
-                    if (
-                        edit_record_index is not None
-                        and edit_record.get("_record_version") == "new"
-                    ):
-                        if st.button(
-                            "🗑️ 刪除此筆新版裝機資料",
-                            use_container_width=True,
-                            disabled=not can_delete_dev_data(),
-                            help="若紀錄包含照片，確認後會一併移至 Google Drive 垃圾桶。",
-                            key=f"delete_new_installation_{edit_record.get('紀錄ID', edit_record_index)}",
-                        ):
-                            st.session_state.dev_pending_delete = {
-                                "type": "installation",
-                                "record": dict(edit_record),
-                            }
-                            st.session_state.dev_delete_dialog_key += 1
-                            st.session_state.dev_results_grid_key += 1
-                            st.rerun()
-                        if not can_delete_dev_data():
-                            st.caption("目前帳號沒有刪除裝機資料與照片的權限。")
-                    elif edit_record_index is not None:
-                        st.caption("舊版資料為唯讀，不能在新版搜尋區刪除。")
-
-                    if edit_submitted and edit_record_index is not None:
-                        missing_edit_fields = []
-                        if not edited_plant.strip():
-                            missing_edit_fields.append("廠別")
-                        if not edited_case.strip():
-                            missing_edit_fields.append("案件")
-                        if not edited_machine.strip():
-                            missing_edit_fields.append("機台名稱")
-                        if edited_status == "未完成" and not edited_reason.strip():
-                            missing_edit_fields.append("未完成原因")
-
-                        if missing_edit_fields:
-                            st.error(f"請填寫必填欄位：{'、'.join(missing_edit_fields)}")
-                        else:
-                            old_record = dict(edit_record)
-                            updated_record = dict(edit_record)
-                            if edited_checklist_results is not None:
-                                edited_checklist = "、".join(
-                                    f"{'✅' if checked else '❌'} {item_name}"
-                                    for item_name, checked in edited_checklist_results.items()
-                                ) or "未設定確認項目"
-                            updated_record.update({
-                                "日期": edited_date.strftime("%Y-%m-%d"),
-                                "廠別": edited_plant.strip(),
-                                "案件": edited_case.strip(),
-                                "機台名稱": edited_machine.strip(),
-                                "項目確認": edited_checklist.strip(),
-                                "安裝人員": edited_installers.strip() or "未指定",
-                                "狀態": edited_status,
-                                "未完成或缺貨原因": (
-                                    edited_reason.strip() if edited_status == "未完成" else ""
-                                ),
-                                "Remark": edited_remark.strip(),
-                            })
-                            try:
-                                if edit_record.get("_record_version") == "legacy":
-                                    updated_record["來源版本"] = "舊版轉換"
-                                    updated_record["來源鍵"] = edit_record.get("來源鍵", "")
-                                    saved_record_id = append_new_installation_record(updated_record)
-                                    action_message = (
-                                        f"已將舊版裝機紀錄轉為新版：{edited_plant}／"
-                                        f"{edited_case}／{edited_machine}"
-                                    )
-                                else:
-                                    update_new_installation_record(edit_record, updated_record)
-                                    saved_record_id = edit_record.get("紀錄ID", "")
-                                    action_message = (
-                                        f"已修改新版裝機紀錄：{edited_plant}／"
-                                        f"{edited_case}／{edited_machine}"
-                                    )
-
-                                related_completed_count = 0
-                                if edited_status == "已完成":
-                                    related_completed_count = complete_matching_new_installation_records(
-                                        updated_record,
-                                        exclude_record_id=saved_record_id,
-                                    )
-                                if related_completed_count:
-                                    action_message += (
-                                        f"，並完成 {related_completed_count} 筆相同機台的新版紀錄"
-                                    )
-                                log_dev_delete_action(
-                                    action_message,
-                                    str(old_record),
-                                    str(updated_record),
-                                )
-                                st.session_state.dev_flash_level = "success"
-                                st.session_state.dev_flash_message = action_message
-                                st.session_state.dev_results_edit_form_key += 1
-                                st.session_state.dev_results_grid_key += 1
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"新版裝機紀錄儲存失敗：{e}")
 
                 st.info(
                     f"新版 {len(new_results_records)} 筆｜"
