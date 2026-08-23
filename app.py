@@ -5557,8 +5557,35 @@ with tab1:
     
     if st.button("🔍 查詢當日動態", key="btn_morning"):
         with st.spinner('讀取雲端資料中...'):
-            data = load_production_installation_records()
-            df = pd.DataFrame(data)
+            new_morning_records = load_new_installation_records()
+            converted_legacy_keys = {
+                str(record.get("來源鍵", "")).strip()
+                for record in new_morning_records
+                if str(record.get("來源鍵", "")).startswith("OLD-")
+            }
+            legacy_morning_records = [
+                record
+                for record in legacy_records_for_new_interface()
+                if str(record.get("來源鍵", "")).strip()
+                not in converted_legacy_keys
+            ]
+            combined_morning_records = [
+                {
+                    **dict(record),
+                    "資料來源": "新版",
+                    "_record_version": "new",
+                }
+                for record in new_morning_records
+            ]
+            combined_morning_records.extend([
+                {
+                    **dict(record),
+                    "資料來源": "舊版",
+                    "_record_version": "legacy",
+                }
+                for record in legacy_morning_records
+            ])
+            df = pd.DataFrame(combined_morning_records)
             
             if not df.empty:
                 df['日期_temp'] = pd.to_datetime(df['日期'], format='mixed', errors='coerce').dt.date
@@ -5566,20 +5593,37 @@ with tab1:
                 
                 if not filtered_df.empty:
                     filtered_df['日期'] = filtered_df['日期'].astype(str)
+                    filtered_df['_排序建立時間'] = pd.to_datetime(
+                        filtered_df.get(
+                            "建立時間",
+                            pd.Series(index=filtered_df.index, dtype=str),
+                        ),
+                        format='mixed',
+                        errors='coerce',
+                    )
+                    filtered_df['_來源排序'] = filtered_df['_record_version'].map(
+                        {"new": 0, "legacy": 1}
+                    )
+                    filtered_df = filtered_df.sort_values(
+                        by=['_排序建立時間', '_來源排序'],
+                        ascending=[False, True],
+                        na_position='last',
+                        kind='stable',
+                    ).drop(columns=['_排序建立時間', '_來源排序'])
                     st.session_state.tab1_filtered_df = filtered_df
                     st.session_state.tab1_search_active = True
                 else:
                     st.session_state.tab1_filtered_df = pd.DataFrame()
                     st.session_state.tab1_search_active = True
             else:
-                st.warning("試算表中尚無任何資料。")
+                st.warning("新版與舊版試算表中尚無任何資料。")
                 st.session_state.tab1_search_active = False
 
     if st.session_state.tab1_search_active:
         filtered_df = st.session_state.tab1_filtered_df
         if not filtered_df.empty:
             st.success(f"找到 {len(filtered_df)} 筆紀錄 (🖱️ 提示：點擊任意列可彈出詳細資訊)")
-            display_cols = ["廠別", "案件", "機台名稱", "安裝人員", "狀態", "Remark"]
+            display_cols = ["資料來源", "廠別", "案件", "機台名稱", "安裝人員", "狀態", "Remark"]
             display_cols = [col for col in display_cols if col in filtered_df.columns]
             
             event = st.dataframe(
