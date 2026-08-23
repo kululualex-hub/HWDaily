@@ -217,6 +217,8 @@ NEW_INSTALLATION_HEADERS = [
     "照片檔名",
     "照片連結",
     "照片ID",
+    "訂單",
+    "業務紀錄ID",
 ]
 CUSTOM_CASE_PENDING_SOURCE = "新版輸入-其他案件待確認"
 CUSTOM_CASE_SETUP_SOURCE = "新版輸入-其他案件待設定"
@@ -981,6 +983,8 @@ def load_new_installation_records():
             "照片檔名": str(row.get("照片檔名", "")).strip(),
             "照片連結": str(row.get("照片連結", "")).strip(),
             "照片ID": str(row.get("照片ID", "")).strip(),
+            "訂單": str(row.get("訂單", "")).strip(),
+            "業務紀錄ID": str(row.get("業務紀錄ID", "")).strip(),
             "_new_sheet_row": sheet_row_number,
         })
     return records
@@ -1011,6 +1015,8 @@ def new_installation_row_values(record, existing_record=None):
         str(record.get("照片檔名") or existing_record.get("照片檔名") or ""),
         str(record.get("照片連結") or existing_record.get("照片連結") or ""),
         str(record.get("照片ID") or existing_record.get("照片ID") or ""),
+        str(record.get("訂單") or existing_record.get("訂單") or ""),
+        str(record.get("業務紀錄ID") or existing_record.get("業務紀錄ID") or ""),
     ]
 
 
@@ -1588,6 +1594,8 @@ def sync_dev_data_to_google():
         "業務狀態",
         "裝機確認時間",
         "裝機確認人",
+        "已施工",
+        "已施工紀錄ID",
     ]
     sync_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
     operator = f"{st.session_state.user_name} ({st.session_state.user_role})"
@@ -1638,6 +1646,11 @@ def sync_dev_data_to_google():
             "業務紀錄ID": record.get("業務紀錄ID", ""),
             "品名": record.get("品名", ""),
             "數量": record.get("數量", ""),
+            "已施工": record.get("已施工", 0),
+            "已施工紀錄ID": json.dumps(
+                record.get("已施工紀錄ID", []),
+                ensure_ascii=False,
+            ),
             "工程名稱": record.get("工程名稱", ""),
             "業務狀態": record.get("業務狀態", ""),
             "裝機確認時間": record.get("裝機確認時間", ""),
@@ -1779,9 +1792,13 @@ def load_latest_dev_data_from_google():
                 "業務紀錄ID": sales_record_id,
                 "建立時間": str(row.get("操作時間", "")).strip(),
                 "訂單": str(row.get("訂單", "")).strip(),
-                "廠區": str(row.get("廠別", "")).strip(),
+                "廠區": normalize_report_plant_name(row.get("廠別", "")),
                 "品名": product_name or legacy_part_number,
                 "數量": report_integer(row.get("數量", 0)),
+                "已施工": report_integer(row.get("已施工", 0)),
+                "已施工紀錄ID": parse_installation_photo_list(
+                    row.get("已施工紀錄ID", "")
+                ),
                 "工程名稱": str(row.get("工程名稱", "")).strip(),
                 "業務狀態": str(row.get("業務狀態", "")).strip(),
                 "裝機確認時間": str(row.get("裝機確認時間", "")).strip(),
@@ -1795,6 +1812,12 @@ def load_latest_dev_data_from_google():
                     if sales_record["廠區"] and product_name and sales_record["數量"] > 0
                     else "舊資料"
                 )
+            if (
+                sales_record["數量"] > 0
+                and sales_record["已施工"] >= sales_record["數量"]
+                and sales_record["業務狀態"] == "已確認"
+            ):
+                sales_record["業務狀態"] = "可驗收"
             sales_records.append(sales_record)
         elif record_type == "品名工程對照":
             product_name = str(row.get("品名", "")).strip()
@@ -1955,15 +1978,23 @@ def render_secure_attachment_download(record, key_prefix, label_prefix="下載")
     )
 
 
-def render_sales_delete_controls(key_prefix):
+def render_sales_delete_controls(key_prefix, record_indices=None):
     """供具刪除權限者選擇業務紀錄，實際刪除在確認對話框進行。"""
     if not can_delete_dev_data() or not st.session_state.dev_sales_records:
+        return
+
+    available_indices = (
+        list(record_indices)
+        if record_indices is not None
+        else list(range(len(st.session_state.dev_sales_records)))
+    )
+    if not available_indices:
         return
 
     st.markdown("##### 管理資料")
     selected_index = st.selectbox(
         "選擇要刪除的業務紀錄",
-        range(len(st.session_state.dev_sales_records)),
+        available_indices,
         format_func=lambda index: (
             f"{st.session_state.dev_sales_records[index].get('訂單', '')}｜"
             f"{st.session_state.dev_sales_records[index].get('品名', '') or st.session_state.dev_sales_records[index].get('品號', '')}｜"
@@ -2012,6 +2043,112 @@ def find_matching_case_name(case_name):
     )
 
 
+def matching_sales_orders(plant_name, project_name, include_completed=False):
+    """依廠區與工程名稱找出可綁定的業務訂單。"""
+    target_plant = str(plant_name or "").strip().casefold()
+    target_project = str(project_name or "").strip().casefold()
+    if not target_plant or not target_project:
+        return []
+
+    matched_records = []
+    for record_index, record in enumerate(st.session_state.dev_sales_records):
+        if (
+            str(record.get("廠區", "")).strip().casefold() != target_plant
+            or str(record.get("工程名稱", "")).strip().casefold()
+            != target_project
+            or not str(record.get("訂單", "")).strip()
+            or (
+                not include_completed
+                and str(record.get("業務狀態", "")).strip() != "已確認"
+            )
+        ):
+            continue
+        order_quantity = report_integer(record.get("數量", 0))
+        installed_quantity = report_integer(record.get("已施工", 0))
+        if not include_completed and (
+            str(record.get("業務狀態", "")).strip() == "可驗收"
+            or (order_quantity > 0 and installed_quantity >= order_quantity)
+        ):
+            continue
+        matched_records.append((record_index, record))
+    return matched_records
+
+
+def apply_completed_installation_to_sales(installation_record, installation_record_id):
+    """裝機首次完成時累加訂單已施工，並以裝機 ID 防止重複計數。"""
+    if str(installation_record.get("狀態", "")).strip() != "已完成":
+        return ""
+
+    cleaned_installation_id = str(installation_record_id or "").strip()
+    business_record_id = str(
+        installation_record.get("業務紀錄ID", "")
+    ).strip()
+    order_number = str(installation_record.get("訂單", "")).strip()
+    if not cleaned_installation_id or (not business_record_id and not order_number):
+        return ""
+
+    target_record = next(
+        (
+            record
+            for record in st.session_state.dev_sales_records
+            if business_record_id
+            and str(record.get("業務紀錄ID", "")).strip()
+            == business_record_id
+        ),
+        None,
+    )
+    if target_record is None:
+        fallback_matches = matching_sales_orders(
+            installation_record.get("廠別", ""),
+            installation_record.get("案件", ""),
+            include_completed=True,
+        )
+        target_record = next(
+            (
+                record
+                for _, record in fallback_matches
+                if str(record.get("訂單", "")).strip() == order_number
+            ),
+            None,
+        )
+    if target_record is None:
+        return ""
+
+    raw_counted_record_ids = target_record.get("已施工紀錄ID", [])
+    if not isinstance(raw_counted_record_ids, list):
+        raw_counted_record_ids = parse_installation_photo_list(
+            raw_counted_record_ids
+        )
+    counted_record_ids = [
+        str(record_id).strip()
+        for record_id in raw_counted_record_ids
+        if str(record_id).strip()
+    ]
+    if cleaned_installation_id in counted_record_ids:
+        return ""
+
+    order_quantity = report_integer(target_record.get("數量", 0))
+    installed_quantity = report_integer(target_record.get("已施工", 0))
+    if order_quantity <= 0:
+        return ""
+
+    new_installed_quantity = min(order_quantity, installed_quantity + 1)
+    target_record["已施工"] = new_installed_quantity
+    counted_record_ids.append(cleaned_installation_id)
+    target_record["已施工紀錄ID"] = counted_record_ids
+    if new_installed_quantity >= order_quantity:
+        target_record["業務狀態"] = "可驗收"
+
+    action_message = (
+        f"訂單「{target_record.get('訂單', '')}」已施工更新為 "
+        f"{new_installed_quantity}/{order_quantity}"
+    )
+    if target_record.get("業務狀態") == "可驗收":
+        action_message += "，已轉入可驗收清單"
+    queue_dev_auto_sync(action_message)
+    return action_message
+
+
 def queue_checklist_navigation(case_name):
     """安排下一次重跑時切換到指定案件的確認項目設定。"""
     st.session_state.dev_checklist_navigation_case = str(case_name or "").strip()
@@ -2038,7 +2175,7 @@ def render_sales_area():
         with sales_col2:
             sales_plant = st.text_input(
                 "廠區 *",
-                placeholder="輸入廠區名稱",
+                placeholder="例如 TSMC-08，儲存時會自動轉換為 T8",
                 key=f"dev_sales_plant_{sales_form_key}",
             )
         with sales_col3:
@@ -2070,7 +2207,8 @@ def render_sales_area():
             st.error("目前帳號沒有新增業務資料的權限。")
         else:
             cleaned_order = sales_order.strip()
-            cleaned_plant = sales_plant.strip()
+            raw_sales_plant = sales_plant.strip()
+            cleaned_plant = normalize_report_plant_name(raw_sales_plant)
             cleaned_product_name = sales_product_name.strip()
             missing_sales_fields = []
             if not cleaned_order:
@@ -2090,6 +2228,7 @@ def render_sales_area():
                     "廠區": cleaned_plant,
                     "品名": cleaned_product_name,
                     "數量": int(sales_quantity),
+                    "已施工": 0,
                     "工程名稱": "",
                     "業務狀態": "待裝機確認",
                     "裝機確認時間": "",
@@ -2099,23 +2238,50 @@ def render_sales_area():
                 queue_dev_auto_sync(
                     f"已新增業務項目：訂單「{cleaned_order}」、"
                     f"廠區「{cleaned_plant}」、品名「{cleaned_product_name}」"
+                    + (
+                        f"（原輸入：{raw_sales_plant}）"
+                        if raw_sales_plant and raw_sales_plant != cleaned_plant
+                        else ""
+                    )
                 )
                 st.session_state.dev_sales_form_key += 1
                 st.rerun()
 
     st.divider()
-    st.markdown("#### 業務項目")
+    st.markdown("#### 業務項目（待裝機確認）")
     if st.session_state.dev_sales_records:
-        sales_df = pd.DataFrame(st.session_state.dev_sales_records)
-        sales_columns = [
-            column for column in [
-                "建立時間", "訂單", "廠區", "品名", "數量", "工程名稱", "業務狀態", "建立者"
-            ]
-            if column in sales_df.columns
+        pending_business_entries = [
+            (record_index, record)
+            for record_index, record
+            in enumerate(st.session_state.dev_sales_records)
+            if str(record.get("業務狀態", "")).strip()
+            not in {"已確認", "可驗收"}
         ]
-        st.dataframe(sales_df[sales_columns], hide_index=True, use_container_width=True)
-        st.info(f"目前共有 {len(sales_df)} 筆業務資料。")
-        render_sales_delete_controls("role_sales")
+        pending_business_records = [
+            record for _, record in pending_business_entries
+        ]
+        if pending_business_records:
+            sales_df = pd.DataFrame(pending_business_records)
+            sales_columns = [
+                column for column in [
+                    "建立時間", "訂單", "廠區", "品名", "數量", "已施工",
+                    "工程名稱", "業務狀態", "建立者"
+                ]
+                if column in sales_df.columns
+            ]
+            st.dataframe(
+                sales_df[sales_columns],
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.info(f"目前共有 {len(sales_df)} 筆待裝機確認資料。")
+        else:
+            st.info("目前沒有待裝機確認的業務項目。")
+
+        render_sales_delete_controls(
+            "role_sales",
+            [record_index for record_index, _ in pending_business_entries],
+        )
     else:
         st.info("目前沒有業務資料。")
 
@@ -3044,9 +3210,9 @@ def report_integer(value):
 
 
 def normalize_report_plant_name(raw_plant_name):
-    """將訂單檔的 TSMC／TSMX 廠區名稱轉成報告使用的代號。"""
+    """將訂單檔的 TSMC 廠區名稱轉成報告使用的代號。"""
     cleaned_name = re.sub(r"\s+", "", str(raw_plant_name or "").strip())
-    prefix_match = re.match(r"^(?:TSMC|TSMX)-(.+)$", cleaned_name, flags=re.IGNORECASE)
+    prefix_match = re.match(r"^TSMC-(.+)$", cleaned_name, flags=re.IGNORECASE)
     if not prefix_match:
         return cleaned_name
 
@@ -3843,13 +4009,17 @@ def find_product_project_mapping(product_name):
 def render_order_progress_area():
     """顯示已完成裝機確認的業務項目。"""
     st.markdown("### 訂單進度區")
-    st.caption("裝機確認區完成工程名稱配對後，項目會自動出現在此處。")
+    st.caption(
+        "裝機確認區完成工程名稱配對後，項目會自動出現在此處；"
+        "已施工達到數量時，狀態會變為「可驗收」。"
+    )
     progress_record_entries = sorted(
         [
             (record_index, record)
             for record_index, record
             in enumerate(st.session_state.dev_sales_records)
-            if str(record.get("業務狀態", "")).strip() == "已確認"
+            if str(record.get("業務狀態", "")).strip()
+            in {"已確認", "可驗收"}
             and str(record.get("工程名稱", "")).strip()
         ],
         key=lambda entry: (
@@ -3863,28 +4033,57 @@ def render_order_progress_area():
         st.info("目前沒有已完成裝機確認的訂單項目。")
         return
 
-    progress_df = pd.DataFrame(progress_records)
     progress_columns = [
-        column for column in [
-            "建立時間",
-            "訂單",
-            "廠區",
-            "品名",
-            "數量",
-            "工程名稱",
-            "業務狀態",
-            "裝機確認時間",
-            "裝機確認人",
-            "建立者",
-        ]
-        if column in progress_df.columns
+        "建立時間",
+        "訂單",
+        "廠區",
+        "品名",
+        "數量",
+        "已施工",
+        "工程名稱",
+        "業務狀態",
+        "裝機確認時間",
+        "裝機確認人",
+        "建立者",
     ]
-    st.dataframe(
-        progress_df[progress_columns],
-        hide_index=True,
-        use_container_width=True,
+
+    def render_progress_group(title, records, empty_message, summary_message):
+        st.markdown(f"#### {title}")
+        if not records:
+            st.info(empty_message)
+            return
+        records_df = pd.DataFrame(records)
+        visible_columns = [
+            column for column in progress_columns
+            if column in records_df.columns
+        ]
+        st.dataframe(
+            records_df[visible_columns],
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.info(summary_message.format(count=len(records)))
+
+    active_progress_records = [
+        record for record in progress_records
+        if str(record.get("業務狀態", "")).strip() == "已確認"
+    ]
+    acceptance_records = [
+        record for record in progress_records
+        if str(record.get("業務狀態", "")).strip() == "可驗收"
+    ]
+    render_progress_group(
+        "📋 進行中訂單",
+        active_progress_records,
+        "目前沒有進行中的訂單項目。",
+        "目前共有 {count} 筆進行中的訂單資料。",
     )
-    st.info(f"目前共有 {len(progress_records)} 筆訂單進度資料。")
+    render_progress_group(
+        "✅ 可驗收項目",
+        acceptance_records,
+        "目前沒有可驗收項目。",
+        "目前共有 {count} 筆可驗收資料。",
+    )
 
     if st.session_state.get("user_role") == "管理者":
         st.markdown("#### 🗑️ 刪除訂單進度")
@@ -3895,7 +4094,8 @@ def render_order_progress_area():
                 f"{progress_record_entries[position][1].get('訂單', '')}｜"
                 f"{progress_record_entries[position][1].get('廠區', '')}｜"
                 f"{progress_record_entries[position][1].get('品名', '') or progress_record_entries[position][1].get('品號', '')}｜"
-                f"{progress_record_entries[position][1].get('工程名稱', '')}"
+                f"{progress_record_entries[position][1].get('工程名稱', '')}｜"
+                f"{progress_record_entries[position][1].get('業務狀態', '')}"
             ),
             key="order_progress_delete_select",
         )
@@ -3949,6 +4149,7 @@ def render_installation_confirmation_area(can_download):
                 "廠區": record.get("廠區", ""),
                 "品名": record.get("品名", ""),
                 "數量": record.get("數量", ""),
+                "已施工": record.get("已施工", 0),
                 "狀態": record.get("業務狀態", ""),
             }
             for _, record in pending_sales_records
@@ -3975,7 +4176,8 @@ def render_installation_confirmation_area(can_download):
                 f"**訂單：** {selected_sales_record.get('訂單', '')}　｜　"
                 f"**廠區：** {selected_sales_record.get('廠區', '')}　｜　"
                 f"**品名：** {product_name}　｜　"
-                f"**數量：** {selected_sales_record.get('數量', '')}"
+                f"**數量：** {selected_sales_record.get('數量', '')}　｜　"
+                f"**已施工：** {selected_sales_record.get('已施工', 0)}"
             )
             project_options = sorted(
                 {
@@ -4036,15 +4238,30 @@ def render_installation_confirmation_area(can_download):
                         f"{st.session_state.user_name} ({st.session_state.user_role})"
                     )
                     selected_sales_record["工程名稱"] = cleaned_project
-                    selected_sales_record["業務狀態"] = "已確認"
+                    order_quantity = report_integer(
+                        selected_sales_record.get("數量", 0)
+                    )
+                    installed_quantity = report_integer(
+                        selected_sales_record.get("已施工", 0)
+                    )
+                    selected_sales_record["業務狀態"] = (
+                        "可驗收"
+                        if order_quantity > 0 and installed_quantity >= order_quantity
+                        else "已確認"
+                    )
                     selected_sales_record["裝機確認時間"] = confirmation_time
                     selected_sales_record["裝機確認人"] = confirmer
                     mapping_key = mapped_product_name or product_name
                     st.session_state.dev_product_project_mappings[mapping_key] = (
                         cleaned_project
                     )
+                    destination_name = (
+                        "可驗收清單"
+                        if selected_sales_record["業務狀態"] == "可驗收"
+                        else "訂單進度"
+                    )
                     action_message = (
-                        f"已確認業務項目並加入訂單進度："
+                        f"已確認業務項目並加入{destination_name}："
                         f"訂單「{selected_sales_record.get('訂單', '')}」、"
                         f"品名「{product_name}」→ 工程「{cleaned_project}」"
                     )
@@ -4739,7 +4956,12 @@ def render_export_checklist_selector(checklist_lines, key_prefix):
     return selected_labels
 
 
-def build_dev_excel_export(machine_records, selected_checklist_items):
+def build_dev_excel_export(
+    machine_records,
+    selected_checklist_items,
+    export_plant="",
+    order_product_names=None,
+):
     """建立多機台確認 Excel；內部用完整路徑判斷，標題只顯示末層項目。"""
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {"in_memory": True})
@@ -4753,6 +4975,16 @@ def build_dev_excel_export(machine_records, selected_checklist_items):
         "valign": "vcenter",
     }
     header_format = workbook.add_format({**common_format, "text_wrap": True})
+    title_format = workbook.add_format({
+        "font_name": "新細明體",
+        "font_size": 12,
+        "font_color": "#000000",
+        "bg_color": "#FFFFFF",
+        "bold": True,
+        "border": 1,
+        "align": "center",
+        "valign": "vcenter",
+    })
     cell_format = workbook.add_format(common_format)
     date_format = workbook.add_format({**common_format, "num_format": "m/d/yy"})
     completed_format = workbook.add_format({**common_format, "bg_color": "#C6EFCE"})
@@ -4764,22 +4996,41 @@ def build_dev_excel_export(machine_records, selected_checklist_items):
     ]
     headers = [
         "日期",
-        "廠別",
+        "訂單",
         "案件名稱",
         "機台名",
         *checklist_header_names,
         "狀態",
     ]
-    sheet.write_row(0, 0, headers, header_format)
+    last_column = len(headers) - 1
+    product_names = []
+    order_product_names = order_product_names or {}
+    for record in machine_records:
+        order_number = str(record.get("訂單", "")).strip()
+        product_name = str(order_product_names.get(order_number, "")).strip()
+        if product_name and product_name not in product_names:
+            product_names.append(product_name)
+    if not product_names:
+        for product_name in order_product_names.values():
+            cleaned_product_name = str(product_name).strip()
+            if (
+                cleaned_product_name
+                and cleaned_product_name not in product_names
+            ):
+                product_names.append(cleaned_product_name)
+    title_text = f"{export_plant}：{'、'.join(product_names) or '未設定品名'}"
+    # 標題只置中於基本資料欄 A:D；避免確認項目過多時跑到畫面右側。
+    sheet.merge_range(0, 0, 0, 3, title_text, title_format)
+    sheet.write_row(1, 0, headers, header_format)
 
-    for row_index, record in enumerate(machine_records, start=1):
+    for row_index, record in enumerate(machine_records, start=2):
         date_value = pd.to_datetime(record.get("日期", ""), errors="coerce")
         if pd.notna(date_value):
             sheet.write_datetime(row_index, 0, date_value.to_pydatetime(), date_format)
         else:
             sheet.write(row_index, 0, str(record.get("日期", "")), cell_format)
 
-        sheet.write(row_index, 1, record.get("廠別", ""), cell_format)
+        sheet.write(row_index, 1, str(record.get("訂單", "")), cell_format)
         sheet.write(row_index, 2, record.get("案件", ""), cell_format)
         sheet.write(row_index, 3, record.get("機台名稱", ""), cell_format)
 
@@ -4813,10 +5064,10 @@ def build_dev_excel_export(machine_records, selected_checklist_items):
             )
         sheet.set_row(row_index, 28)
 
-    last_column = len(headers) - 1
-    sheet.autofilter(0, 0, max(len(machine_records), 1), last_column)
-    sheet.freeze_panes(1, 4)
-    sheet.set_row(0, 40)
+    sheet.autofilter(1, 0, max(len(machine_records) + 1, 2), last_column)
+    sheet.freeze_panes(2, 4)
+    sheet.set_row(0, 24)
+    sheet.set_row(1, 40)
     sheet.set_column(0, 0, 12)
     sheet.set_column(1, 1, 12)
     sheet.set_column(2, 3, 18)
@@ -4942,6 +5193,8 @@ def show_details_dialog(
     st.markdown(f"### 💻 機台名稱：{row_data.get('機台名稱', '')}")
     st.markdown(f"**📅 日期：** {row_data.get('日期', '')}")
     st.markdown(f"**📂 案件：** {row_data.get('案件', '')}")
+    if str(row_data.get("訂單", "")).strip():
+        st.markdown(f"**📦 訂單：** {row_data.get('訂單', '')}")
     st.markdown(f"**👷 安裝人員：** {row_data.get('安裝人員', '')}")
     st.markdown(f"**🚦 狀態：** {row_data.get('狀態', '')}")
     if row_data.get('建立時間', ''):
@@ -5199,6 +5452,13 @@ def show_details_dialog(
                                 f"{updated_record.get('廠別', '')}／"
                                 f"{updated_record.get('案件', '')}／"
                                 f"{updated_record.get('機台名稱', '')} → {edited_status}"
+                            )
+
+                        sales_progress_message = ""
+                        if edited_status == "已完成":
+                            sales_progress_message = apply_completed_installation_to_sales(
+                                updated_record,
+                                saved_record_id,
                             )
 
                         related_completed_count = 0
@@ -5828,7 +6088,7 @@ with tab1:
         filtered_df = st.session_state.tab1_filtered_df
         if not filtered_df.empty:
             st.success(f"找到 {len(filtered_df)} 筆紀錄 (🖱️ 提示：點擊任意列可彈出詳細資訊)")
-            display_cols = ["資料來源", "廠別", "案件", "機台名稱", "安裝人員", "狀態", "Remark"]
+            display_cols = ["資料來源", "廠別", "案件", "訂單", "機台名稱", "安裝人員", "狀態", "Remark"]
             display_cols = [col for col in display_cols if col in filtered_df.columns]
             
             event = st.dataframe(
@@ -5912,6 +6172,33 @@ with tab2:
                     key=f"dev_identity_machine_{dev_key}",
                 )
 
+            matched_order_entries = matching_sales_orders(
+                identity_plant,
+                identity_case,
+            )
+            selected_order_record = None
+            if matched_order_entries:
+                order_choice = st.selectbox(
+                    "訂單（依廠別＋案件／工程名稱篩選）",
+                    [None, *range(len(matched_order_entries))],
+                    format_func=lambda choice: (
+                        "不綁定訂單"
+                        if choice is None
+                        else (
+                            f"{matched_order_entries[choice][1].get('訂單', '')}｜"
+                            f"{matched_order_entries[choice][1].get('品名', '')}｜"
+                            f"已施工 "
+                            f"{matched_order_entries[choice][1].get('已施工', 0)}/"
+                            f"{matched_order_entries[choice][1].get('數量', 0)}"
+                        )
+                    ),
+                    key=f"dev_identity_order_{dev_key}",
+                )
+                if order_choice is not None:
+                    selected_order_record = matched_order_entries[order_choice][1]
+            elif identity_plant and identity_case:
+                st.caption("目前沒有符合此廠別與工程名稱的未達量訂單。")
+
             if st.button(
                 "檢查未完成紀錄並繼續",
                 type="primary",
@@ -5933,6 +6220,16 @@ with tab2:
                         "廠別": identity_plant,
                         "案件": identity_case,
                         "機台名稱": identity_machine.strip(),
+                        "訂單": (
+                            str(selected_order_record.get("訂單", "")).strip()
+                            if selected_order_record
+                            else ""
+                        ),
+                        "業務紀錄ID": (
+                            str(selected_order_record.get("業務紀錄ID", "")).strip()
+                            if selected_order_record
+                            else ""
+                        ),
                         "自訂廠別": identity_plant_choice == "其他",
                         "自訂案件": identity_case_choice == "其他",
                     }
@@ -5979,6 +6276,8 @@ with tab2:
                 st.success(
                     f"已確認：{identity_data['廠別']}／{loaded_case}／{identity_data['機台名稱']}"
                 )
+                if identity_data.get("訂單"):
+                    st.caption(f"已綁定訂單：{identity_data['訂單']}")
                 if previous_prefill.get("資料來源"):
                     st.caption(f"已帶入來源：{previous_prefill['資料來源']}（唯讀參考）")
             with identity_action_col:
@@ -6099,10 +6398,13 @@ with tab2:
                     for item_name, checked in checklist_results.items()
                 ) or "未設定確認項目"
                 current_preview = {
+                    "_送出識別碼": uuid.uuid4().hex,
                     "日期": dev_date.strftime("%Y-%m-%d"),
                     "廠別": identity_data["廠別"],
                     "案件": loaded_case,
                     "機台名稱": identity_data["機台名稱"],
+                    "訂單": identity_data.get("訂單", ""),
+                    "業務紀錄ID": identity_data.get("業務紀錄ID", ""),
                     "項目確認": checklist_summary,
                     "安裝人員": "、".join(dev_installers) if dev_installers else "未指定",
                     "狀態": dev_status,
@@ -6130,7 +6432,7 @@ with tab2:
                 preview_record = {
                     key: value
                     for key, value in st.session_state.dev_add_preview.items()
-                    if not str(key).startswith("_")
+                    if not str(key).startswith("_") and key != "業務紀錄ID"
                 }
                 pending_photo_names = [
                     photo.get("name", "")
@@ -6155,6 +6457,10 @@ with tab2:
                 ):
                     test_record = dict(st.session_state.dev_add_preview)
                     pending_photos = test_record.pop("_待上傳照片", [])
+                    submission_id = str(
+                        test_record.pop("_送出識別碼", "") or uuid.uuid4().hex
+                    )
+                    test_record["紀錄ID"] = submission_id
                     test_record["建立時間"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     uploaded_photos = []
                     record_saved = False
@@ -6185,8 +6491,22 @@ with tab2:
                             if identity_data.get("自訂案件")
                             else "新版輸入"
                         )
-                        new_record_id = append_new_installation_record(test_record)
+                        existing_submission = next(
+                            (
+                                record
+                                for record in load_new_installation_records()
+                                if str(record.get("紀錄ID", "")).strip()
+                                == submission_id
+                            ),
+                            None,
+                        )
+                        new_record_id = (
+                            submission_id
+                            if existing_submission
+                            else append_new_installation_record(test_record)
+                        )
                         record_saved = True
+                        sales_progress_message = ""
                         if test_record.get("狀態") == "已完成":
                             try:
                                 complete_matching_new_installation_records(
@@ -6195,6 +6515,10 @@ with tab2:
                                 )
                             except Exception:
                                 pass
+                            sales_progress_message = apply_completed_installation_to_sales(
+                                test_record,
+                                new_record_id,
+                            )
                         st.session_state.dev_add_preview = None
                         st.session_state.dev_previous_prefill = None
                         st.session_state.dev_identity_draft = None
@@ -6210,16 +6534,34 @@ with tab2:
                                 if identity_data.get("自訂案件")
                                 else ""
                             )
+                            + (
+                                f" {sales_progress_message}。"
+                                if sales_progress_message
+                                else ""
+                            )
                         )
                         st.rerun()
                     except Exception as e:
-                        if not record_saved:
+                        if record_saved:
+                            st.session_state.dev_add_preview = None
+                            st.session_state.dev_previous_prefill = None
+                            st.session_state.dev_identity_draft = None
+                            st.session_state.dev_loaded_case = None
+                            st.session_state.dev_add_form_key += 1
+                            st.session_state.dev_checklist_key += 1
+                            st.session_state.dev_flash_level = "warning"
+                            st.session_state.dev_flash_message = (
+                                "裝機紀錄已成功儲存，但訂單進度或後續處理失敗；"
+                                f"不需要重複新增。詳細錯誤：{e}"
+                            )
+                            st.rerun()
+                        else:
                             for uploaded_photo in uploaded_photos:
                                 try:
                                     delete_dev_attachment(uploaded_photo.get("id", ""))
                                 except Exception:
                                     pass
-                        st.error(f"新版裝機紀錄儲存失敗：{e}")
+                            st.error(f"新版裝機紀錄儲存失敗：{e}")
 
             if st.button("清空表單", key="dev_clear_add_form"):
                 st.session_state.dev_add_form_key += 1
@@ -6423,6 +6765,7 @@ with tab3:
             "日期",
             "廠別",
             "案件",
+            "訂單",
             "機台名稱",
             "項目確認",
             "安裝人員",
@@ -6566,6 +6909,7 @@ with tab4:
             "日期",
             "廠別",
             "案件",
+            "訂單",
             "機台名稱",
             "安裝人員",
             "狀態",
@@ -7274,22 +7618,101 @@ if can_edit and tab_dev is not None:
                     key=f"dev_export_case_{export_plant}",
                 )
 
+                matching_order_products = {}
+                for sales_record in st.session_state.dev_sales_records:
+                    sales_plant = normalize_report_plant_name(
+                        sales_record.get("廠區", "")
+                    )
+                    sales_project = str(
+                        sales_record.get("工程名稱", "")
+                    ).strip()
+                    order_number = str(sales_record.get("訂單", "")).strip()
+                    sales_status = str(
+                        sales_record.get("業務狀態", "")
+                    ).strip()
+                    if (
+                        order_number
+                        and sales_status in {"已確認", "可驗收"}
+                        and sales_plant.casefold()
+                        == normalize_report_plant_name(export_plant).casefold()
+                        and sales_project.casefold() == export_case.casefold()
+                    ):
+                        product_name = str(
+                            sales_record.get("品名", "")
+                        ).strip()
+                        matching_order_products.setdefault(order_number, [])
+                        if (
+                            product_name
+                            and product_name
+                            not in matching_order_products[order_number]
+                        ):
+                            matching_order_products[order_number].append(product_name)
+
+                order_product_names = {
+                    order_number: "、".join(product_names)
+                    for order_number, product_names
+                    in matching_order_products.items()
+                }
+                order_options = sorted(matching_order_products)
+                selected_orders = st.multiselect(
+                    "選擇訂單號碼（選填，可複選）",
+                    order_options,
+                    default=[],
+                    format_func=lambda order_number: (
+                        f"{order_number}｜"
+                        f"{order_product_names.get(order_number, '未設定品名')}"
+                    ),
+                    key=f"dev_export_orders_{export_plant}_{export_case}",
+                    placeholder="請選擇訂單號碼",
+                )
+                if not order_options:
+                    st.info(
+                        "訂單進度區沒有符合的訂單資料；仍可選擇機台，"
+                        "匯出的訂單欄會保持空白。"
+                    )
+
                 case_records = [
                     record for record in plant_records
                     if str(record.get("案件", "")).strip() == export_case
+                    and (
+                        not selected_orders
+                        or str(record.get("訂單", "")).strip()
+                        in selected_orders
+                    )
                 ]
                 latest_machine_records = {}
                 for record in case_records:
                     machine_name = str(record.get("機台名稱", "")).strip()
                     if machine_name:
-                        latest_machine_records[machine_name] = record
+                        machine_key = (
+                            str(record.get("訂單", "")).strip()
+                            if selected_orders else "",
+                            machine_name,
+                        )
+                        latest_machine_records[machine_key] = record
 
-                machine_options = sorted(latest_machine_records)
-                selected_machines = st.multiselect(
+                machine_options = sorted(
+                    latest_machine_records,
+                    key=lambda machine_key: (
+                        machine_key[0],
+                        machine_key[1].casefold(),
+                    ),
+                )
+                order_selection_key = hashlib.sha256(
+                    "|".join(selected_orders).encode("utf-8")
+                ).hexdigest()[:10]
+                selected_machine_keys = st.multiselect(
                     "選擇要輸出的機台（可複選）",
                     machine_options,
                     default=[],
-                    key=f"dev_export_machines_{export_plant}_{export_case}",
+                    format_func=lambda machine_key: (
+                        f"{machine_key[1]}｜訂單 {machine_key[0]}"
+                        if machine_key[0] else machine_key[1]
+                    ),
+                    key=(
+                        f"dev_export_machines_{export_plant}_{export_case}_"
+                        f"{order_selection_key}"
+                    ),
                 )
 
                 checklist_definition = st.session_state.dev_case_checklists.get(export_case, [])
@@ -7304,18 +7727,28 @@ if can_edit and tab_dev is not None:
 
                 if not checklist_options:
                     st.warning("此案件尚未建立確認項目，請先至「下拉選項管理」設定。")
-                elif not selected_machines:
+                elif not selected_machine_keys:
                     st.warning("請至少選擇一台機台。")
                 elif not selected_export_items:
                     st.warning("請至少選擇一個確認項目。")
                 else:
                     selected_machine_records = [
-                        latest_machine_records[machine_name]
-                        for machine_name in selected_machines
+                        {
+                            **latest_machine_records[machine_key],
+                            "訂單": (
+                                latest_machine_records[machine_key].get(
+                                    "訂單", ""
+                                )
+                                if selected_orders else ""
+                            ),
+                        }
+                        for machine_key in selected_machine_keys
                     ]
                     excel_data = build_dev_excel_export(
                         selected_machine_records,
                         selected_export_items,
+                        export_plant,
+                        order_product_names,
                     )
                     unsafe_filename = f"{export_plant}_{export_case}_裝機確認表_{datetime.now().strftime('%Y%m%d')}.xlsx"
                     safe_filename = "".join(
