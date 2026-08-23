@@ -4893,7 +4893,12 @@ def render_installation_photo_popover(row_data, installation_photos):
 
 
 @st.dialog("📝 詳細資料檢視", on_dismiss=reset_dialog_selection)
-def show_details_dialog(row_data, reset_key, allow_status_edit=False):
+def show_details_dialog(
+    row_data,
+    reset_key,
+    allow_status_edit=False,
+    allow_full_edit=False,
+):
     st.session_state.active_dialog_reset_key = reset_key
     data_source = str(row_data.get("資料來源", "")).strip()
     if data_source:
@@ -4945,9 +4950,9 @@ def show_details_dialog(row_data, reset_key, allow_status_edit=False):
 
     if allow_status_edit:
         st.markdown("---")
-        st.markdown("### ✏️ 修改狀態")
+        st.markdown("### ✏️ 修改裝機資料" if allow_full_edit else "### ✏️ 修改狀態")
         if st.session_state.get("user_role") != "管理者":
-            st.info("狀態修改僅限管理者操作。")
+            st.info("資料修改僅限管理者操作。")
         else:
             current_status = str(row_data.get("狀態", "")).strip()
             normalized_status = (
@@ -4961,6 +4966,134 @@ def show_details_dialog(row_data, reset_key, allow_status_edit=False):
                     f"{row_data.get('Sheet_Row', '')}"
                 ).encode("utf-8")
             ).hexdigest()[:12]
+
+            edited_date = str(row_data.get("日期", "")).strip()
+            edited_plant = str(row_data.get("廠別", "")).strip()
+            edited_case = str(row_data.get("案件", "")).strip()
+            edited_machine = str(row_data.get("機台名稱", "")).strip()
+            edited_installers = str(row_data.get("安裝人員", "")).strip()
+            edited_checklist = str(row_data.get("項目確認", "")).strip()
+            edited_remark = str(row_data.get("Remark", "")).strip()
+
+            if allow_full_edit:
+                parsed_record_date = pd.to_datetime(
+                    edited_date.replace("/", "-"),
+                    format="mixed",
+                    errors="coerce",
+                )
+                default_record_date = (
+                    parsed_record_date.date()
+                    if not pd.isna(parsed_record_date)
+                    else datetime.now().date()
+                )
+                edit_col1, edit_col2 = st.columns(2)
+                with edit_col1:
+                    edited_date_value = st.date_input(
+                        "裝機日期 *",
+                        default_record_date,
+                        key=f"dev_detail_date_{record_key}",
+                    )
+                with edit_col2:
+                    edited_machine = st.text_input(
+                        "機台名稱 *",
+                        value=edited_machine,
+                        key=f"dev_detail_machine_{record_key}",
+                    ).strip()
+
+                plant_options = sorted(
+                    {
+                        option
+                        for option in [
+                            edited_plant,
+                            *st.session_state.get("dev_plant_options", []),
+                        ]
+                        if str(option).strip() and str(option).strip() != "其他"
+                    },
+                    key=natural_plant_sort_key,
+                )
+                plant_choices = [*plant_options, "其他"]
+                selected_plant = st.selectbox(
+                    "廠別 *",
+                    plant_choices,
+                    index=(
+                        plant_choices.index(edited_plant)
+                        if edited_plant in plant_choices
+                        else len(plant_choices) - 1
+                    ),
+                    key=f"dev_detail_plant_{record_key}",
+                )
+                if selected_plant == "其他":
+                    edited_plant = st.text_input(
+                        "自行輸入廠別名稱 *",
+                        value=edited_plant if edited_plant not in plant_options else "",
+                        key=f"dev_detail_custom_plant_{record_key}",
+                    ).strip()
+                else:
+                    edited_plant = selected_plant
+
+                case_options = sorted({
+                    option
+                    for option in [
+                        edited_case,
+                        *st.session_state.get("dev_case_options", []),
+                    ]
+                    if str(option).strip() and str(option).strip() != "其他"
+                })
+                case_choices = [*case_options, "其他"]
+                selected_case = st.selectbox(
+                    "案件 *",
+                    case_choices,
+                    index=(
+                        case_choices.index(edited_case)
+                        if edited_case in case_choices
+                        else len(case_choices) - 1
+                    ),
+                    key=f"dev_detail_case_{record_key}",
+                )
+                if selected_case == "其他":
+                    edited_case = st.text_input(
+                        "自行輸入案件名稱 *",
+                        value=edited_case if edited_case not in case_options else "",
+                        key=f"dev_detail_custom_case_{record_key}",
+                    ).strip()
+                else:
+                    edited_case = selected_case
+
+                edited_installers = st.text_input(
+                    "安裝人員",
+                    value=edited_installers,
+                    help="多人可使用、分隔。",
+                    key=f"dev_detail_installers_{record_key}",
+                ).strip()
+
+                st.markdown("#### 項目確認")
+                edit_checklist_lines = st.session_state.get(
+                    "dev_case_checklists", {}
+                ).get(edited_case, [])
+                if edit_checklist_lines:
+                    checklist_case_key = hashlib.sha256(
+                        edited_case.encode("utf-8")
+                    ).hexdigest()[:8]
+                    edited_checklist_results = render_checklist_editor(
+                        edit_checklist_lines,
+                        str(row_data.get("項目確認", "")),
+                        f"dev_detail_check_{record_key}_{checklist_case_key}",
+                    )
+                    edited_checklist = "、".join(
+                        f"{'✅' if checked else '❌'} {item_name}"
+                        for item_name, checked in edited_checklist_results.items()
+                    ) or "未設定確認項目"
+                else:
+                    st.info("此案件尚未設定確認項目，將保留原有內容。")
+
+                edited_remark = st.text_area(
+                    "Remark",
+                    value=edited_remark,
+                    height=100,
+                    key=f"dev_detail_remark_{record_key}",
+                ).strip()
+                edited_date = edited_date_value.strftime("%Y-%m-%d")
+
             edited_status = st.selectbox(
                 "狀態",
                 ["未完成", "已完成"],
@@ -4980,23 +5113,40 @@ def show_details_dialog(row_data, reset_key, allow_status_edit=False):
                 )
 
             if st.button(
-                "儲存狀態修改",
+                "儲存全部修改" if allow_full_edit else "儲存狀態修改",
                 type="primary",
                 use_container_width=True,
                 key=f"dev_detail_status_save_{record_key}",
             ):
-                if edited_status == "未完成" and not edited_reason.strip():
+                missing_fields = []
+                if allow_full_edit and not edited_plant:
+                    missing_fields.append("廠別")
+                if allow_full_edit and not edited_case:
+                    missing_fields.append("案件")
+                if allow_full_edit and not edited_machine:
+                    missing_fields.append("機台名稱")
+
+                if missing_fields:
+                    st.error(f"請填寫必填欄位：{'、'.join(missing_fields)}")
+                elif edited_status == "未完成" and not edited_reason.strip():
                     st.error("狀態為未完成時，請填寫未完成原因。")
                 else:
                     old_record = dict(row_data)
                     updated_record = dict(row_data)
                     updated_record.update({
+                        "日期": edited_date,
+                        "廠別": edited_plant,
+                        "案件": edited_case,
+                        "機台名稱": edited_machine,
+                        "項目確認": edited_checklist,
+                        "安裝人員": edited_installers or "未指定",
                         "狀態": edited_status,
                         "未完成或缺貨原因": (
                             edited_reason.strip()
                             if edited_status == "未完成"
                             else ""
                         ),
+                        "Remark": edited_remark,
                     })
                     try:
                         if str(row_data.get("_record_version", "")) == "legacy":
@@ -5004,7 +5154,7 @@ def show_details_dialog(row_data, reset_key, allow_status_edit=False):
                             updated_record["來源鍵"] = row_data.get("來源鍵", "")
                             saved_record_id = append_new_installation_record(updated_record)
                             action_message = (
-                                "已將舊版裝機紀錄轉為新版並更新狀態："
+                                "已將舊版裝機紀錄轉為新版並更新資料："
                                 f"{updated_record.get('廠別', '')}／"
                                 f"{updated_record.get('案件', '')}／"
                                 f"{updated_record.get('機台名稱', '')} → {edited_status}"
@@ -5013,7 +5163,7 @@ def show_details_dialog(row_data, reset_key, allow_status_edit=False):
                             update_new_installation_record(old_record, updated_record)
                             saved_record_id = row_data.get("紀錄ID", "")
                             action_message = (
-                                "已更新新版裝機紀錄狀態："
+                                "已更新新版裝機紀錄："
                                 f"{updated_record.get('廠別', '')}／"
                                 f"{updated_record.get('案件', '')}／"
                                 f"{updated_record.get('機台名稱', '')} → {edited_status}"
@@ -5041,7 +5191,7 @@ def show_details_dialog(row_data, reset_key, allow_status_edit=False):
                         )
                         st.rerun()
                     except Exception as error:
-                        st.error(f"狀態修改失敗：{error}")
+                        st.error(f"資料修改失敗：{error}")
 
             if str(row_data.get("_record_version", "")) == "new":
                 if st.button(
@@ -5063,7 +5213,7 @@ def show_details_dialog(row_data, reset_key, allow_status_edit=False):
                 if not can_delete_dev_data():
                     st.caption("目前帳號沒有刪除裝機資料與照片的權限。")
             else:
-                st.caption("舊版資料不能直接刪除；修改狀態後會另存為新版。")
+                st.caption("舊版資料不能直接刪除；修改後會另存為新版。")
     
     if st.button("❌ 關閉視窗並取消選取", type="primary", use_container_width=True):
         st.session_state[reset_key] += 1  
@@ -6242,7 +6392,7 @@ with tab3:
         if display_results_df.empty:
             st.info("沒有符合目前搜尋條件的裝機資料。")
         else:
-            st.caption("勾選一筆資料可開啟詳細內容；狀態修改僅限管理者操作。")
+            st.caption("勾選一筆資料可開啟詳細內容；完整資料修改僅限管理者操作。")
             results_event = st.dataframe(
                 display_results_df,
                 hide_index=True,
@@ -6264,6 +6414,7 @@ with tab3:
                     pd.Series(combined_results_records[selected_combined_index]),
                     "dev_results_grid_key",
                     allow_status_edit=True,
+                    allow_full_edit=True,
                 )
 
             # 修改入口已整合至搜尋結果勾選後的詳細視窗。
