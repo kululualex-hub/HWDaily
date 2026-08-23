@@ -5675,17 +5675,21 @@ tab_specs = [
     ("search", "🔍 歷史搜尋與修改"),
     ("tracking", "📌 待追蹤清單 (更新狀態)"),
 ]
-if can_access_sales and not can_edit:
-    tab_specs.append(("sales", "💼 業務專區"))
-if can_access_development and not can_edit:
-    tab_specs.append(("development", "🛠️ 開發專區"))
-if can_access_installation and not can_edit:
-    tab_specs.append(("installation", "✅ 裝機確認區"))
-if (can_access_sales or can_access_installation) and not can_edit:
-    tab_specs.append(("order_progress", "📦 訂單進度區"))
 if can_edit:
+    # 管理者的業務與訂單進度改為正式主分頁，並置於報告專區左側。
+    tab_specs.append(("sales", "💼 業務專區"))
+    tab_specs.append(("order_progress", "📦 訂單進度區"))
     tab_specs.append(("report", "📊 報告專區"))
     tab_specs.append(("dev_admin", "🧪 開發測試區"))
+else:
+    if can_access_sales:
+        tab_specs.append(("sales", "💼 業務專區"))
+    if can_access_development:
+        tab_specs.append(("development", "🛠️ 開發專區"))
+    if can_access_installation:
+        tab_specs.append(("installation", "✅ 裝機確認區"))
+    if can_access_sales or can_access_installation:
+        tab_specs.append(("order_progress", "📦 訂單進度區"))
 
 tabs = st.tabs([label for _, label in tab_specs])
 tab_map = {tab_key: tab for (tab_key, _), tab in zip(tab_specs, tabs)}
@@ -6556,7 +6560,7 @@ with tab4:
 if tab_sales is not None:
     with tab_sales:
         initialize_dev_cloud_data()
-        if can_access_sales:
+        if can_edit or can_access_sales:
             render_sales_area()
         else:
             st.error("目前帳號沒有進入業務專區的權限。")
@@ -6580,7 +6584,7 @@ if tab_installation is not None:
 if tab_order_progress is not None:
     with tab_order_progress:
         initialize_dev_cloud_data()
-        if can_access_sales or can_access_installation:
+        if can_edit or can_access_sales or can_access_installation:
             render_order_progress_area()
         else:
             st.error("目前帳號沒有進入訂單進度區的權限。")
@@ -6618,21 +6622,17 @@ if can_edit and tab_dev is not None:
         (
             dev_legacy_add_tab,
             dev_options_tab,
-            dev_sales_tab,
             dev_development_tab,
             dev_handoff_tab,
             dev_installation_tab,
-            dev_order_progress_tab,
             dev_legacy_search_tab,
             dev_excel_tab,
         ) = st.tabs([
             "📝 舊版新增裝機",
             "⚙️ 下拉選項管理",
-            "💼 業務專區",
             "🛠️ 開發專區",
             "🧰 背鍋俠專區",
             "✅ 裝機確認區",
-            "📦 訂單進度區",
             "📋 舊版搜尋與修改",
             "📥 Excel 匯出",
         ],
@@ -6650,9 +6650,6 @@ if can_edit and tab_dev is not None:
 
         with dev_installation_tab:
             render_installation_confirmation_area(can_download_attachment)
-
-        with dev_order_progress_tab:
-            render_order_progress_area()
 
         with dev_legacy_add_tab:
             st.subheader("填寫裝機資訊")
@@ -6893,9 +6890,6 @@ if can_edit and tab_dev is not None:
 
             render_option_manager("廠別", "dev_plant_options", "dev_plant")
             render_option_manager("案件", "dev_case_options", "dev_case")
-
-        with dev_sales_tab:
-            render_sales_area()
 
         with dev_development_tab:
             st.markdown("### 開發專區")
