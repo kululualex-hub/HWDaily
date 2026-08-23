@@ -3844,19 +3844,21 @@ def render_order_progress_area():
     """顯示已完成裝機確認的業務項目。"""
     st.markdown("### 訂單進度區")
     st.caption("裝機確認區完成工程名稱配對後，項目會自動出現在此處。")
-    progress_records = sorted(
+    progress_record_entries = sorted(
         [
-            record
-            for record in st.session_state.dev_sales_records
+            (record_index, record)
+            for record_index, record
+            in enumerate(st.session_state.dev_sales_records)
             if str(record.get("業務狀態", "")).strip() == "已確認"
             and str(record.get("工程名稱", "")).strip()
         ],
-        key=lambda record: (
-            str(record.get("裝機確認時間", "")),
-            str(record.get("建立時間", "")),
+        key=lambda entry: (
+            str(entry[1].get("裝機確認時間", "")),
+            str(entry[1].get("建立時間", "")),
         ),
         reverse=True,
     )
+    progress_records = [record for _, record in progress_record_entries]
     if not progress_records:
         st.info("目前沒有已完成裝機確認的訂單項目。")
         return
@@ -3883,6 +3885,36 @@ def render_order_progress_area():
         use_container_width=True,
     )
     st.info(f"目前共有 {len(progress_records)} 筆訂單進度資料。")
+
+    if st.session_state.get("user_role") == "管理者":
+        st.markdown("#### 🗑️ 刪除訂單進度")
+        selected_progress_position = st.selectbox(
+            "選擇要刪除的訂單進度",
+            range(len(progress_record_entries)),
+            format_func=lambda position: (
+                f"{progress_record_entries[position][1].get('訂單', '')}｜"
+                f"{progress_record_entries[position][1].get('廠區', '')}｜"
+                f"{progress_record_entries[position][1].get('品名', '') or progress_record_entries[position][1].get('品號', '')}｜"
+                f"{progress_record_entries[position][1].get('工程名稱', '')}"
+            ),
+            key="order_progress_delete_select",
+        )
+        if st.button(
+            "🗑️ 刪除選取的訂單進度",
+            use_container_width=True,
+            key="order_progress_delete_button",
+        ):
+            selected_record_index = progress_record_entries[
+                selected_progress_position
+            ][0]
+            st.session_state.dev_pending_delete = {
+                "type": "order_progress",
+                "index": selected_record_index,
+            }
+            st.session_state.dev_delete_dialog_key += 1
+            st.rerun()
+    else:
+        st.caption("訂單進度刪除功能僅限管理者使用。")
 
 
 def render_installation_confirmation_area(can_download):
@@ -5494,15 +5526,22 @@ def show_dev_delete_dialog():
     if not pending_delete:
         st.rerun()
 
-    can_delete = st.session_state.get("user_permissions", {}).get(
-        "attachment_delete",
-        st.session_state.get("user_role") == "管理者",
-    )
+    record_type = pending_delete.get("type")
+    if record_type == "order_progress":
+        # 訂單進度刪除與附件權限無關，固定限管理者。
+        can_delete = st.session_state.get("user_role") == "管理者"
+    else:
+        can_delete = st.session_state.get("user_permissions", {}).get(
+            "attachment_delete",
+            st.session_state.get("user_role") == "管理者",
+        )
     if not can_delete:
-        st.error("目前帳號沒有刪除資料或附件的權限。")
+        if record_type == "order_progress":
+            st.error("訂單進度刪除功能僅限管理者操作。")
+        else:
+            st.error("目前帳號沒有刪除資料或附件的權限。")
         return
 
-    record_type = pending_delete.get("type")
     if record_type == "installation":
         record = dict(pending_delete.get("record") or {})
         if not str(record.get("紀錄ID", "")).strip():
@@ -5584,7 +5623,7 @@ def show_dev_delete_dialog():
     record_index = int(pending_delete.get("index", -1))
     records = (
         st.session_state.dev_sales_records
-        if record_type == "sales"
+        if record_type in {"sales", "order_progress"}
         else st.session_state.dev_development_records
     )
     if record_index < 0 or record_index >= len(records):
@@ -5597,7 +5636,7 @@ def show_dev_delete_dialog():
     st.markdown(f"**訂單：** {order_number}")
     st.markdown(f"**品名／品號：** {part_number}")
 
-    if record_type == "sales":
+    if record_type in {"sales", "order_progress"}:
         related_records = [
             item for item in st.session_state.dev_development_records
             if str(item.get("訂單", "")).strip() == order_number
@@ -5612,7 +5651,13 @@ def show_dev_delete_dialog():
                 st.session_state.dev_pending_delete = None
                 st.rerun()
             return
-        st.warning("刪除後會從業務專區移除，此動作無法在 App 中復原。")
+        if record_type == "order_progress":
+            st.warning(
+                "確認後會同時從訂單進度與業務專區刪除此筆資料，"
+                "並同步至 Google Sheets；此動作無法在 App 中復原。"
+            )
+        else:
+            st.warning("刪除後會從業務專區移除，此動作無法在 App 中復原。")
     else:
         attachment_name = str(record.get("附件檔名", "")).strip()
         st.markdown(f"**附件：** {attachment_name or '（無附件名稱）'}")
@@ -5640,8 +5685,14 @@ def show_dev_delete_dialog():
                     log_dev_delete_action(action_message, deleted_record.get("附件檔名", ""))
                 else:
                     deleted_record = st.session_state.dev_sales_records.pop(record_index)
+                    action_label = (
+                        "訂單進度資料"
+                        if record_type == "order_progress"
+                        else "業務紀錄"
+                    )
                     action_message = (
-                        f"已刪除業務紀錄：訂單「{order_number}」、品號「{part_number}」"
+                        f"已刪除{action_label}：訂單「{order_number}」、"
+                        f"品名／品號「{part_number}」"
                     )
                     log_dev_delete_action(action_message, str(deleted_record))
 
