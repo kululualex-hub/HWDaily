@@ -1089,6 +1089,22 @@ def build_report_statistics_excel(report_df, report_year):
                 ranking_df.get("訂單數量", 0),
                 errors="coerce",
             ).fillna(0)
+            def latest_completion_rate_label(row):
+                """取得工程最後一個有紀錄月份的完成率顯示文字。"""
+                for month_column in reversed(month_columns):
+                    month_value = row.get(month_column, "")
+                    if pd.isna(month_value) or str(month_value).strip() == "":
+                        continue
+                    numeric_rate = report_completion_rate_number(month_value)
+                    if numeric_rate is not None:
+                        return f"{numeric_rate:.0%}"
+                    return str(month_value).strip()
+                return "—"
+
+            ranking_df["_完成率顯示"] = ranking_df.apply(
+                latest_completion_rate_label,
+                axis=1,
+            )
             ranking_df["_工程標籤"] = ranking_df.apply(
                 lambda row: "－".join(
                     label
@@ -1114,6 +1130,7 @@ def build_report_statistics_excel(report_df, report_year):
                 "已安裝",
                 "已出貨待安裝",
                 "未出貨",
+                "完成率標籤位置",
             ]
             for helper_offset, helper_header in enumerate(ranking_headers):
                 worksheet.write(
@@ -1140,6 +1157,13 @@ def build_report_statistics_excel(report_df, report_year):
                         ranking_start_column + helper_offset,
                         float(progress_record[progress_column]),
                     )
+                # Add a negligible final stacked segment to anchor the custom
+                # completion-rate label at the right end of the whole bar.
+                worksheet.write_number(
+                    ranking_header_row + helper_row_offset,
+                    ranking_start_column + 4,
+                    0.000001,
+                )
 
             progress_chart = workbook.add_chart({
                 "type": "bar",
@@ -1170,8 +1194,44 @@ def build_report_statistics_excel(report_df, report_year):
                     "fill": {"color": progress_color},
                     "border": {"none": True},
                 })
+            completion_rate_labels = [
+                {
+                    "value": str(rate_label),
+                    "font": {
+                        "name": "Arial",
+                        "size": 8,
+                        "bold": True,
+                        "color": "#404040",
+                    },
+                }
+                for rate_label in ranking_df["_完成率顯示"].tolist()
+            ]
+            progress_chart.add_series({
+                "name": "完成率",
+                "categories": [
+                    area_name,
+                    ranking_header_row + 1,
+                    ranking_start_column,
+                    ranking_last_row,
+                    ranking_start_column,
+                ],
+                "values": [
+                    area_name,
+                    ranking_header_row + 1,
+                    ranking_start_column + 4,
+                    ranking_last_row,
+                    ranking_start_column + 4,
+                ],
+                "fill": {"none": True},
+                "border": {"none": True},
+                "data_labels": {
+                    "value": True,
+                    "position": "outside_end",
+                    "custom": completion_rate_labels,
+                },
+            })
             progress_chart.set_title({
-                "name": "待處理工程進度（前 10 名）",
+                "name": "待處理工程進度與最新完成率（前 10 名）",
             })
             progress_chart.set_x_axis({
                 "name": "數量（台）",
@@ -1184,9 +1244,11 @@ def build_report_statistics_excel(report_df, report_year):
             progress_chart.set_y_axis({
                 "reverse": True,
                 "label_position": "low",
+                "num_font": {"name": "Arial", "size": 8},
             })
             progress_chart.set_legend({
                 "position": "bottom",
+                "delete_series": [3],
                 "font": {"name": "Arial", "size": 8},
             })
             progress_chart.set_chartarea({"border": {"none": True}})
@@ -1201,7 +1263,7 @@ def build_report_statistics_excel(report_df, report_year):
 
         worksheet.set_column(
             ranking_start_column,
-            ranking_start_column + 3,
+            ranking_start_column + 4,
             None,
             None,
             {"hidden": True},
@@ -1233,7 +1295,7 @@ def build_report_statistics_excel(report_df, report_year):
                     "type": "cell",
                     "criteria": "between",
                     "minimum": 0.5,
-                    "maximum": 0.999999,
+                    "maximum": 0.749999,
                     "format": heat_yellow_format,
                 },
             )
@@ -1245,14 +1307,14 @@ def build_report_statistics_excel(report_df, report_year):
                 {
                     "type": "cell",
                     "criteria": ">=",
-                    "value": 1,
+                    "value": 0.75,
                     "format": heat_green_format,
                 },
             )
             worksheet.write(
                 header_row - 1,
                 0,
-                "完成率熱度：紅色低於 50%、黃色 50%～99%、綠色 100%、灰色為待料或無資料",
+                "完成率熱度：紅色 0%～49%、黃色 50%～74%、綠色 75%～100%、灰色為待料或無資料",
                 generated_format,
             )
         if export_columns:
@@ -4355,16 +4417,21 @@ def report_integer(value):
 
 def normalize_report_plant_name(raw_plant_name):
     """將訂單檔的 TSMC 廠區名稱轉成報告使用的代號。"""
-    cleaned_name = re.sub(r"\s+", "", str(raw_plant_name or "").strip())
-    prefix_match = re.match(r"^TSMC-(.+)$", cleaned_name, flags=re.IGNORECASE)
+    original_name = str(raw_plant_name or "").strip()
+    compact_name = re.sub(r"\s+", "", original_name)
+    prefix_match = re.match(r"^TSMC-(.+)$", compact_name, flags=re.IGNORECASE)
     if not prefix_match:
-        return cleaned_name
+        # Only TSMC-prefixed values require conversion. Preserve spaces in
+        # names such as "UMC 8C" so they continue matching report data.
+        return original_name
 
     suffix = prefix_match.group(1).strip().upper()
     if suffix == "JP":
         return "JASM"
     if suffix.isdigit():
         return f"T{int(suffix)}"
+    if re.fullmatch(r"\d+[A-Z][A-Z0-9]*", suffix):
+        return f"T{suffix}"
     return suffix
 
 
@@ -5820,6 +5887,98 @@ def format_checklist_progress(summary):
     completed, incomplete = parse_checklist_summary(summary)
     total = len(completed) + len(incomplete)
     return f"已施工 {len(completed)}/{total}" if total else "未設定"
+
+
+def build_history_search_excel(search_results_df):
+    """將目前歷史搜尋結果輸出為具篩選、凍結標題與換行格式的 Excel。"""
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {"in_memory": True})
+    worksheet = workbook.add_worksheet("歷史搜尋結果")
+    worksheet.hide_gridlines(2)
+
+    header_format = workbook.add_format({
+        "bold": True,
+        "font_color": "#FFFFFF",
+        "bg_color": "#4472C4",
+        "border": 1,
+        "align": "center",
+        "valign": "vcenter",
+    })
+    text_format = workbook.add_format({
+        "border": 1,
+        "valign": "top",
+    })
+    wrapped_format = workbook.add_format({
+        "border": 1,
+        "valign": "top",
+        "text_wrap": True,
+    })
+    completed_format = workbook.add_format({
+        "border": 1,
+        "valign": "top",
+        "align": "center",
+        "bg_color": "#D9EAD3",
+        "font_color": "#274E13",
+    })
+    incomplete_format = workbook.add_format({
+        "border": 1,
+        "valign": "top",
+        "align": "center",
+        "bg_color": "#FFF2CC",
+        "font_color": "#7F6000",
+    })
+
+    export_df = search_results_df.fillna("").copy()
+    export_columns = list(export_df.columns)
+    for column_index, column_name in enumerate(export_columns):
+        worksheet.write(0, column_index, column_name, header_format)
+
+    wrapped_columns = {"項目確認", "安裝人員", "未完成原因", "Remark"}
+    for row_offset, (_, record) in enumerate(export_df.iterrows(), start=1):
+        for column_index, column_name in enumerate(export_columns):
+            value = record.get(column_name, "")
+            cell_format = wrapped_format if column_name in wrapped_columns else text_format
+            if column_name == "狀態":
+                if str(value).strip() == "已完成":
+                    cell_format = completed_format
+                elif str(value).strip() in {"未完成", "執行中"}:
+                    cell_format = incomplete_format
+            worksheet.write(row_offset, column_index, str(value), cell_format)
+        worksheet.set_row(row_offset, 32)
+
+    column_widths = {
+        "資料來源": 10,
+        "建立時間": 20,
+        "日期": 13,
+        "廠別": 13,
+        "案件": 24,
+        "訂單": 20,
+        "機台名稱": 18,
+        "項目確認": 18,
+        "安裝人員": 22,
+        "狀態": 12,
+        "未完成原因": 42,
+        "Remark": 48,
+    }
+    for column_index, column_name in enumerate(export_columns):
+        worksheet.set_column(
+            column_index,
+            column_index,
+            column_widths.get(column_name, 16),
+        )
+
+    worksheet.set_row(0, 26)
+    worksheet.freeze_panes(1, 0)
+    if export_columns:
+        worksheet.autofilter(
+            0,
+            0,
+            max(len(export_df), 0),
+            len(export_columns) - 1,
+        )
+    workbook.close()
+    output.seek(0)
+    return output.getvalue()
 
 
 def group_checklist_paths(items):
@@ -8194,6 +8353,18 @@ with tab3:
             st.info("沒有符合目前搜尋條件的裝機資料。")
         else:
             st.caption("勾選一筆資料可開啟詳細內容；完整資料修改僅限管理者操作。")
+            st.download_button(
+                "📥 匯出目前搜尋結果 Excel",
+                data=build_history_search_excel(display_results_df),
+                file_name=(
+                    "鴻伍裝機歷史搜尋結果_"
+                    f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                ),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                on_click="ignore",
+                key="history_search_excel_download",
+            )
             results_event = st.dataframe(
                 display_results_df,
                 hide_index=True,
