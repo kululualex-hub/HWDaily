@@ -5,4 +5,5 @@ openpyxl
 Pillow
 requests
 xlsxwriter
+holidays>=0.86
 starlette<1.4.0

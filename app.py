@@ -1,9 +1,10 @@
 import streamlit as st
 import gspread
 import pandas as pd
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 import base64
+import calendar
 import io
 import json
 import hashlib
@@ -12,6 +13,7 @@ import requests
 import uuid
 import xlsxwriter
 import time
+import holidays
 from openpyxl import load_workbook
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2 import service_account
@@ -189,17 +191,20 @@ DEV_WORKSHEET_NAME = "開發區測試資料"
 NEW_INSTALLATION_WORKSHEET_NAME = "新版裝機紀錄"
 INSTALLATION_EXCEL_WORKSHEET_NAME = "裝機Excel版本紀錄"
 INSTALLATION_COMPARISON_WORKSHEET_NAME = "裝機Excel比較紀錄"
-REPORT_ENTRY_WORKSHEET_NAME = "報告新增資料"
+REPORT_ENTRY_WORKSHEET_NAME = "報告資料"
+REPORT_LEGACY_ENTRY_WORKSHEET_NAME = "報告新增資料"
 REPORT_SETTINGS_WORKSHEET_NAME = "報告月份設定"
+REPORT_MIGRATION_SETTING_KEY = "報告資料雲端搬移完成"
 REPORT_DATA_FILE = Path(__file__).resolve().with_name("data.xlsx")
 REPORT_AREA_ORDER = ["北", "中", "南", "國外"]
 REPORT_COUNT_COLUMNS = ["訂單數量", "已出貨", "未出貨", "已安裝", "已出貨待安裝"]
 REPORT_MONTH_COLUMNS = [f"{month}月份完成率" for month in range(4, 13)]
-REPORT_ENTRY_HEADERS = [
+REPORT_LEGACY_ENTRY_HEADERS = [
     "建立時間", "建立者", "區域", "廠區", "工程名稱",
     *REPORT_COUNT_COLUMNS,
     *REPORT_MONTH_COLUMNS,
 ]
+REPORT_ENTRY_HEADERS = [*REPORT_LEGACY_ENTRY_HEADERS, "年度"]
 REPORT_SETTINGS_HEADERS = ["設定鍵", "設定值", "更新時間", "更新者", "操作"]
 
 NEW_INSTALLATION_HEADERS = [
@@ -277,7 +282,7 @@ def load_report_data(file_path, modified_time_ns):
 
 
 def get_report_entry_worksheet():
-    """取得報告新增資料分頁；不存在時自動建立並設定完成率格式。"""
+    """取得報告資料分頁；舊格式會自動補上年度欄。"""
     worksheet_created = False
     try:
         report_worksheet = sh.worksheet(REPORT_ENTRY_WORKSHEET_NAME)
@@ -295,6 +300,18 @@ def get_report_entry_worksheet():
     if not existing_headers:
         report_worksheet.append_row(REPORT_ENTRY_HEADERS)
         worksheet_created = True
+    elif existing_headers == REPORT_LEGACY_ENTRY_HEADERS:
+        last_column = gspread.utils.rowcol_to_a1(1, len(REPORT_ENTRY_HEADERS))[:-1]
+        report_worksheet.update(
+            range_name=f"A1:{last_column}1",
+            values=[REPORT_ENTRY_HEADERS],
+        )
+        existing_row_count = len(report_worksheet.col_values(1))
+        if existing_row_count >= 2:
+            report_worksheet.update(
+                range_name=f"{last_column}2:{last_column}{existing_row_count}",
+                values=[[datetime.now().year] for _ in range(existing_row_count - 1)],
+            )
     elif existing_headers != REPORT_ENTRY_HEADERS:
         raise ValueError(
             f"「{REPORT_ENTRY_WORKSHEET_NAME}」欄位格式不符，請確認標題列。"
@@ -312,7 +329,7 @@ def get_report_entry_worksheet():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_report_entry_records():
-    """載入由 App 新增、保存在 Google Sheets 的報告資料。"""
+    """載入保存在 Google Sheets「報告資料」分頁的全部報告資料。"""
     report_worksheet = get_report_entry_worksheet()
     report_records = report_worksheet.get_all_records()
     if not report_records:
@@ -334,7 +351,186 @@ def load_report_entry_records():
             report_df[count_column] = pd.to_numeric(
                 report_df[count_column], errors="coerce"
             ).fillna(0)
+    if "年度" not in report_df.columns:
+        report_df["年度"] = datetime.now().year
+    report_df["年度"] = pd.to_numeric(
+        report_df["年度"], errors="coerce"
+    ).fillna(datetime.now().year).astype(int)
     return report_df
+
+
+def report_migration_completed():
+    """確認 data.xlsx 與舊報告新增資料是否已搬移至雲端報告資料。"""
+    settings_worksheet = get_report_settings_worksheet()
+    for record in reversed(settings_worksheet.get_all_records()):
+        if str(record.get("設定鍵", "")).strip() != REPORT_MIGRATION_SETTING_KEY:
+            continue
+        return str(record.get("設定值", "")).strip() == "完成"
+    return False
+
+
+def load_legacy_report_entry_records():
+    """讀取搬移前的「報告新增資料」分頁；不存在時回傳空資料。"""
+    try:
+        legacy_worksheet = sh.worksheet(REPORT_LEGACY_ENTRY_WORKSHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        return pd.DataFrame()
+
+    legacy_records = legacy_worksheet.get_all_records()
+    if not legacy_records:
+        return pd.DataFrame()
+    return pd.DataFrame(legacy_records)
+
+
+def normalize_report_cloud_frame(report_df, default_creator=""):
+    """將不同來源的報告資料整理成雲端報告分頁的固定欄位。"""
+    if report_df is None or report_df.empty:
+        return pd.DataFrame(columns=REPORT_ENTRY_HEADERS)
+
+    normalized_df = report_df.copy()
+    for header in REPORT_ENTRY_HEADERS:
+        if header not in normalized_df.columns:
+            normalized_df[header] = ""
+    normalized_df = normalized_df[REPORT_ENTRY_HEADERS]
+
+    for text_column in ["區域", "廠區", "工程名稱"]:
+        normalized_df[text_column] = (
+            normalized_df[text_column].fillna("").astype(str).str.strip()
+        )
+    normalized_df = normalized_df[
+        normalized_df["區域"].isin(REPORT_AREA_ORDER)
+        & normalized_df["廠區"].ne("")
+        & normalized_df["工程名稱"].ne("")
+    ].copy()
+    if default_creator:
+        normalized_df["建立者"] = normalized_df["建立者"].where(
+            normalized_df["建立者"].fillna("").astype(str).str.strip().ne(""),
+            default_creator,
+        )
+    for count_column in REPORT_COUNT_COLUMNS:
+        normalized_df[count_column] = pd.to_numeric(
+            normalized_df[count_column], errors="coerce"
+        ).fillna(0).astype(int)
+    normalized_years = pd.to_numeric(normalized_df["年度"], errors="coerce")
+    created_years = pd.to_datetime(
+        normalized_df["建立時間"], errors="coerce"
+    ).dt.year
+    normalized_df["年度"] = normalized_years.fillna(
+        created_years
+    ).fillna(datetime.now().year).astype(int)
+    return normalized_df
+
+
+def report_value_for_google_sheet(value):
+    """將 pandas 值轉成可安全寫入 Google Sheets 的基本型別。"""
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if hasattr(value, "item"):
+        value = value.item()
+    return value
+
+
+def migrate_report_data_to_google_sheets():
+    """一次性合併 data.xlsx、舊新增紀錄與既有雲端資料。"""
+    if report_migration_completed():
+        return 0
+
+    source_frames = []
+    if REPORT_DATA_FILE.exists():
+        source_frames.append(
+            normalize_report_cloud_frame(
+                load_report_data(
+                    str(REPORT_DATA_FILE),
+                    REPORT_DATA_FILE.stat().st_mtime_ns,
+                ),
+                default_creator="data.xlsx 搬移",
+            )
+        )
+
+    legacy_df = normalize_report_cloud_frame(
+        load_legacy_report_entry_records(),
+        default_creator="舊報告新增資料搬移",
+    )
+    if not legacy_df.empty:
+        source_frames.append(legacy_df)
+
+    target_worksheet = get_report_entry_worksheet()
+    target_records = target_worksheet.get_all_records()
+    target_df = normalize_report_cloud_frame(
+        pd.DataFrame(target_records) if target_records else pd.DataFrame(),
+    )
+    if not target_df.empty:
+        source_frames.append(target_df)
+
+    usable_frames = [frame for frame in source_frames if not frame.empty]
+    if not usable_frames:
+        raise ValueError("找不到可搬移的 data.xlsx 或既有報告資料。")
+
+    merged_df = pd.concat(usable_frames, ignore_index=True, sort=False)
+    merged_df = merged_df.drop_duplicates(
+        subset=["區域", "廠區", "工程名稱"],
+        keep="last",
+    ).reset_index(drop=True)
+
+    existing_identities = {
+        (
+            str(record.get("區域", "")).strip().casefold(),
+            str(record.get("廠區", "")).strip().casefold(),
+            str(record.get("工程名稱", "")).strip().casefold(),
+        )
+        for record in target_records
+    }
+    rows_to_append = []
+    for _, record in merged_df.iterrows():
+        identity = (
+            str(record.get("區域", "")).strip().casefold(),
+            str(record.get("廠區", "")).strip().casefold(),
+            str(record.get("工程名稱", "")).strip().casefold(),
+        )
+        if identity in existing_identities:
+            continue
+        rows_to_append.append([
+            report_value_for_google_sheet(record.get(header, ""))
+            for header in REPORT_ENTRY_HEADERS
+        ])
+        existing_identities.add(identity)
+
+    if rows_to_append:
+        target_worksheet.append_rows(
+            rows_to_append,
+            value_input_option="USER_ENTERED",
+            table_range=f"A:{chr(ord('A') + len(REPORT_ENTRY_HEADERS) - 1)}",
+        )
+
+    update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    operator = f"{st.session_state.user_name} ({st.session_state.user_role})"
+    get_report_settings_worksheet().append_row(
+        [
+            REPORT_MIGRATION_SETTING_KEY,
+            "完成",
+            update_time,
+            operator,
+            f"搬移並去重 {len(merged_df)} 筆；新增 {len(rows_to_append)} 筆",
+        ],
+        value_input_option="USER_ENTERED",
+    )
+    load_report_entry_records.clear()
+    try:
+        ws_log.append_row(
+            [
+                update_time,
+                operator,
+                "完成報告資料雲端搬移",
+                "",
+                f"共 {len(merged_df)} 筆；新增 {len(rows_to_append)} 筆",
+            ],
+            table_range="A:E",
+        )
+    except Exception:
+        pass
+    return len(rows_to_append)
 
 
 @st.cache_resource(show_spinner=False)
@@ -470,6 +666,10 @@ def append_report_entry(
     next_row = len(report_worksheet.col_values(1)) + 1
     current_month = load_report_active_month()
     operator = f"{st.session_state.user_name} ({st.session_state.user_role})"
+    existing_record = existing_record or {}
+    report_year = pd.to_numeric(existing_record.get("年度", ""), errors="coerce")
+    if pd.isna(report_year):
+        report_year = datetime.now().year
     row_values = {
         "建立時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "建立者": operator,
@@ -481,8 +681,8 @@ def append_report_entry(
         "未出貨": f"=F{next_row}-G{next_row}",
         "已安裝": int(installed_count),
         "已出貨待安裝": f"=G{next_row}-I{next_row}",
+        "年度": int(report_year),
     }
-    existing_record = existing_record or {}
     for month_column in REPORT_MONTH_COLUMNS:
         existing_value = existing_record.get(month_column, "")
         row_values[month_column] = "" if pd.isna(existing_value) else existing_value
@@ -521,29 +721,786 @@ def format_report_completion_rate(value):
     return str(value).strip()
 
 
-def render_report_area():
-    """顯示 data.xlsx 的區域、廠區及工程名稱連動搜尋報告。"""
-    st.subheader("📊 報告專區")
-    st.caption("資料來源：data.xlsx；區域、廠區與工程名稱會依序連動篩選。")
+def report_completion_rate_number(value):
+    """將完成率數值或百分比文字轉成 0 至 1；待料與空白不納入。"""
+    if pd.isna(value) or str(value).strip() == "":
+        return None
+    if isinstance(value, (int, float)):
+        numeric_value = float(value)
+    else:
+        cleaned_value = str(value).strip().replace(",", "")
+        if re.fullmatch(r"-?\d+(?:\.\d+)?%", cleaned_value):
+            numeric_value = float(cleaned_value[:-1]) / 100
+        else:
+            try:
+                numeric_value = float(cleaned_value)
+            except (TypeError, ValueError):
+                return None
+    if numeric_value < 0:
+        return None
+    if numeric_value > 1 and numeric_value <= 100:
+        numeric_value /= 100
+    return min(numeric_value, 1.0)
 
-    if not REPORT_DATA_FILE.exists():
-        st.error("找不到報告來源 data.xlsx，請確認檔案已放在 app.py 同一資料夾。")
+
+def build_report_statistics_excel(report_df, report_year):
+    """建立指定年度、依區域分頁且含各工程折線圖的報告 Excel。"""
+    report_year = int(report_year)
+    if "年度" in report_df.columns:
+        report_year_values = pd.to_numeric(report_df["年度"], errors="coerce")
+        report_df = report_df[report_year_values.eq(report_year)].copy()
+    else:
+        report_df = report_df.copy()
+        report_df["年度"] = report_year
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {"in_memory": True})
+
+    title_format = workbook.add_format({
+        "bold": True,
+        "font_size": 16,
+        "font_color": "#FFFFFF",
+        "bg_color": "#1F4E78",
+        "align": "center",
+        "valign": "vcenter",
+    })
+    generated_format = workbook.add_format({
+        "font_color": "#666666",
+        "align": "left",
+    })
+    metric_label_format = workbook.add_format({
+        "bold": True,
+        "font_color": "#1F1F1F",
+        "bg_color": "#D9EAF7",
+        "border": 1,
+        "align": "center",
+        "valign": "vcenter",
+    })
+    metric_value_format = workbook.add_format({
+        "bold": True,
+        "font_size": 12,
+        "num_format": "#,##0",
+        "border": 1,
+        "align": "center",
+    })
+    header_format = workbook.add_format({
+        "bold": True,
+        "font_color": "#FFFFFF",
+        "bg_color": "#4472C4",
+        "border": 1,
+        "align": "center",
+        "valign": "vcenter",
+        "text_wrap": True,
+    })
+    text_format = workbook.add_format({
+        "border": 1,
+        "valign": "top",
+    })
+    integer_format = workbook.add_format({
+        "border": 1,
+        "num_format": "#,##0",
+        "align": "right",
+        "valign": "top",
+    })
+    year_format = workbook.add_format({
+        "border": 1,
+        "num_format": "0",
+        "align": "center",
+        "valign": "top",
+    })
+    percentage_format = workbook.add_format({
+        "border": 1,
+        "num_format": "0%",
+        "align": "center",
+        "valign": "top",
+    })
+    unavailable_percentage_format = workbook.add_format({
+        "border": 1,
+        "bg_color": "#E7E6E6",
+        "font_color": "#666666",
+        "align": "center",
+        "valign": "top",
+    })
+    heat_red_format = workbook.add_format({
+        "bg_color": "#F4CCCC",
+        "font_color": "#9C0006",
+    })
+    heat_yellow_format = workbook.add_format({
+        "bg_color": "#FFF2CC",
+        "font_color": "#7F6000",
+    })
+    heat_green_format = workbook.add_format({
+        "bg_color": "#D9EAD3",
+        "font_color": "#274E13",
+    })
+    average_label_format = workbook.add_format({
+        "bold": True,
+        "font_color": "#1F1F1F",
+        "bg_color": "#D9EAF7",
+        "border": 1,
+        "align": "center",
+    })
+    average_month_format = workbook.add_format({
+        "bold": True,
+        "font_color": "#FFFFFF",
+        "bg_color": "#4472C4",
+        "border": 1,
+        "align": "center",
+    })
+    average_value_format = workbook.add_format({
+        "bold": True,
+        "num_format": "0%",
+        "border": 1,
+        "align": "center",
+    })
+    centered_text_format = workbook.add_format({
+        "border": 1,
+        "align": "center",
+        "valign": "top",
+    })
+
+    month_columns = [
+        column for column in REPORT_MONTH_COLUMNS
+        if column in report_df.columns
+    ]
+    export_columns = [
+        "年度", "區域", "廠區", "工程名稱",
+        *REPORT_COUNT_COLUMNS,
+        *month_columns,
+    ]
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for area_name in REPORT_AREA_ORDER:
+        worksheet = workbook.add_worksheet(area_name)
+        worksheet.hide_gridlines(2)
+        worksheet.set_landscape()
+        worksheet.fit_to_pages(1, 0)
+        worksheet.set_margins(0.3, 0.3, 0.5, 0.5)
+
+        last_column_index = max(len(export_columns) - 1, 0)
+        worksheet.merge_range(
+            0, 0, 0, last_column_index,
+            f"{report_year} 年 {area_name}區工程統計",
+            title_format,
+        )
+        worksheet.write(1, 0, f"產生時間：{generated_at}", generated_format)
+
+        area_df = report_df[
+            report_df.get("區域", pd.Series(index=report_df.index, dtype=str))
+            .fillna("").astype(str).str.strip().eq(area_name)
+        ].copy()
+        if not area_df.empty:
+            area_df["_廠區排序"] = area_df["廠區"].map(natural_plant_sort_key)
+            area_df["_工程排序"] = area_df["工程名稱"].fillna("").astype(str).str.casefold()
+            area_df = area_df.sort_values(
+                ["_廠區排序", "_工程排序"],
+                kind="stable",
+            ).drop(columns=["_廠區排序", "_工程排序"])
+
+        metric_values = []
+        for count_column in REPORT_COUNT_COLUMNS:
+            if count_column in area_df.columns:
+                metric_total = pd.to_numeric(
+                    area_df[count_column], errors="coerce"
+                ).fillna(0).sum()
+            else:
+                metric_total = 0
+            metric_values.append(int(metric_total))
+
+        for column_index, (metric_label, metric_value) in enumerate(
+            zip(REPORT_COUNT_COLUMNS, metric_values)
+        ):
+            worksheet.write(3, column_index, metric_label, metric_label_format)
+            worksheet.write_number(4, column_index, metric_value, metric_value_format)
+
+        # Reserve two vertically stacked chart areas before the project detail table.
+        # Keeping both charts in column A avoids hiding the project chart outside the
+        # user's current Excel viewport on narrower screens.
+        header_row = 49
+        for column_index, column_name in enumerate(export_columns):
+            worksheet.write(header_row, column_index, column_name, header_format)
+
+        for row_offset, (_, record) in enumerate(area_df.iterrows(), start=1):
+            excel_row = header_row + row_offset
+            for column_index, column_name in enumerate(export_columns):
+                value = record.get(column_name, "")
+                if pd.isna(value):
+                    value = ""
+
+                if column_name == "年度":
+                    worksheet.write_number(
+                        excel_row,
+                        column_index,
+                        report_year,
+                        year_format,
+                    )
+                elif column_name in REPORT_COUNT_COLUMNS:
+                    numeric_value = pd.to_numeric(value, errors="coerce")
+                    if pd.isna(numeric_value):
+                        worksheet.write(excel_row, column_index, "", integer_format)
+                    else:
+                        worksheet.write_number(
+                            excel_row,
+                            column_index,
+                            float(numeric_value),
+                            integer_format,
+                        )
+                elif column_name in month_columns:
+                    percentage_value = report_completion_rate_number(value)
+                    if percentage_value is None:
+                        worksheet.write(
+                            excel_row,
+                            column_index,
+                            str(value).strip(),
+                            unavailable_percentage_format,
+                        )
+                    else:
+                        worksheet.write_number(
+                            excel_row,
+                            column_index,
+                            percentage_value,
+                            percentage_format,
+                        )
+                else:
+                    worksheet.write(
+                        excel_row,
+                        column_index,
+                        str(value).strip(),
+                        text_format,
+                    )
+
+        summary_header_row = 44
+        summary_value_row = 45
+        if month_columns and not area_df.empty:
+            average_completion_values = []
+            for month_column in month_columns:
+                numeric_values = [
+                    numeric_value
+                    for numeric_value in (
+                        report_completion_rate_number(value)
+                        for value in area_df[month_column].tolist()
+                    )
+                    if numeric_value is not None
+                ]
+                average_completion_values.append(
+                    sum(numeric_values) / len(numeric_values)
+                    if numeric_values else None
+                )
+
+            worksheet.write(summary_header_row, 0, "月份", average_month_format)
+            worksheet.write(
+                summary_value_row,
+                0,
+                "平均完成率",
+                average_label_format,
+            )
+            for month_offset, (month_column, average_value) in enumerate(
+                zip(month_columns, average_completion_values),
+                start=1,
+            ):
+                worksheet.write(
+                    summary_header_row,
+                    month_offset,
+                    month_column.replace("份完成率", ""),
+                    average_month_format,
+                )
+                if average_value is None:
+                    worksheet.write_blank(
+                        summary_value_row,
+                        month_offset,
+                        None,
+                        unavailable_percentage_format,
+                    )
+                else:
+                    worksheet.write_number(
+                        summary_value_row,
+                        month_offset,
+                        average_value,
+                        average_value_format,
+                    )
+
+            if any(value is not None for value in average_completion_values):
+                chart = workbook.add_chart({"type": "line"})
+                chart.add_series({
+                    "name": "區域平均完成率",
+                    "categories": [
+                        area_name,
+                        summary_header_row,
+                        1,
+                        summary_header_row,
+                        len(month_columns),
+                    ],
+                    "values": [
+                        area_name,
+                        summary_value_row,
+                        1,
+                        summary_value_row,
+                        len(month_columns),
+                    ],
+                    "marker": {
+                        "type": "circle",
+                        "size": 6,
+                        "border": {"color": "#2F5597"},
+                        "fill": {"color": "#FFFFFF"},
+                    },
+                    "line": {"color": "#4472C4", "width": 2.5},
+                    "gap": 1,
+                })
+                chart.set_title({
+                    "name": f"{report_year} 年 {area_name}區平均完成率"
+                })
+                chart.set_x_axis({"name": "月份"})
+                chart.set_y_axis({
+                    "name": "完成率",
+                    "num_format": "0%",
+                    "min": 0,
+                    "max": 1,
+                    "major_unit": 0.1,
+                    "major_gridlines": {"visible": True, "line": {"color": "#D9E2F3"}},
+                })
+                chart.set_legend({"none": True})
+                chart.set_chartarea({"border": {"none": True}})
+                chart.set_plotarea({"border": {"color": "#D9E2F3"}})
+                chart.set_size({"width": 720, "height": 330})
+                chart.show_blanks_as("gap")
+                worksheet.insert_chart(25, 0, chart)
+            else:
+                worksheet.write(25, 0, "本區目前沒有可繪製的月份完成率資料。")
+        else:
+            worksheet.write(25, 0, "本區目前沒有工程資料。")
+
+        ranking_start_column = len(export_columns) + 1
+        ranking_header_row = 0
+        ranking_df = area_df.copy()
+        if not ranking_df.empty:
+            for progress_column in ["已安裝", "已出貨待安裝", "未出貨"]:
+                progress_values = (
+                    ranking_df[progress_column]
+                    if progress_column in ranking_df.columns
+                    else pd.Series(0, index=ranking_df.index)
+                )
+                ranking_df[progress_column] = pd.to_numeric(
+                    progress_values,
+                    errors="coerce",
+                ).fillna(0)
+            ranking_df["_待處理數量"] = (
+                ranking_df["已出貨待安裝"] + ranking_df["未出貨"]
+            )
+            ranking_df["_訂單排序"] = pd.to_numeric(
+                ranking_df.get("訂單數量", 0),
+                errors="coerce",
+            ).fillna(0)
+            ranking_df["_工程標籤"] = ranking_df.apply(
+                lambda row: "－".join(
+                    label
+                    for label in [
+                        str(row.get("廠區", "")).strip(),
+                        str(row.get("工程名稱", "")).strip(),
+                    ]
+                    if label
+                ),
+                axis=1,
+            )
+            ranking_df = ranking_df[
+                ranking_df["_待處理數量"].gt(0)
+            ].sort_values(
+                ["_待處理數量", "_訂單排序"],
+                ascending=[False, False],
+                kind="stable",
+            ).head(10)
+
+        if not ranking_df.empty:
+            ranking_headers = [
+                "工程",
+                "已安裝",
+                "已出貨待安裝",
+                "未出貨",
+            ]
+            for helper_offset, helper_header in enumerate(ranking_headers):
+                worksheet.write(
+                    ranking_header_row,
+                    ranking_start_column + helper_offset,
+                    helper_header,
+                    header_format,
+                )
+            for helper_row_offset, (_, progress_record) in enumerate(
+                ranking_df.iterrows(),
+                start=1,
+            ):
+                worksheet.write(
+                    ranking_header_row + helper_row_offset,
+                    ranking_start_column,
+                    progress_record["_工程標籤"],
+                )
+                for helper_offset, progress_column in enumerate(
+                    ["已安裝", "已出貨待安裝", "未出貨"],
+                    start=1,
+                ):
+                    worksheet.write_number(
+                        ranking_header_row + helper_row_offset,
+                        ranking_start_column + helper_offset,
+                        float(progress_record[progress_column]),
+                    )
+
+            progress_chart = workbook.add_chart({
+                "type": "bar",
+                "subtype": "stacked",
+            })
+            ranking_last_row = ranking_header_row + len(ranking_df)
+            for progress_name, progress_offset, progress_color in [
+                ("已安裝", 1, "#70AD47"),
+                ("已出貨待安裝", 2, "#FFC000"),
+                ("未出貨", 3, "#C00000"),
+            ]:
+                progress_chart.add_series({
+                    "name": progress_name,
+                    "categories": [
+                        area_name,
+                        ranking_header_row + 1,
+                        ranking_start_column,
+                        ranking_last_row,
+                        ranking_start_column,
+                    ],
+                    "values": [
+                        area_name,
+                        ranking_header_row + 1,
+                        ranking_start_column + progress_offset,
+                        ranking_last_row,
+                        ranking_start_column + progress_offset,
+                    ],
+                    "fill": {"color": progress_color},
+                    "border": {"none": True},
+                })
+            progress_chart.set_title({
+                "name": "待處理工程進度（前 10 名）",
+            })
+            progress_chart.set_x_axis({
+                "name": "數量（台）",
+                "min": 0,
+                "major_gridlines": {
+                    "visible": True,
+                    "line": {"color": "#D9E2F3"},
+                },
+            })
+            progress_chart.set_y_axis({
+                "reverse": True,
+                "label_position": "low",
+            })
+            progress_chart.set_legend({
+                "position": "bottom",
+                "font": {"name": "Arial", "size": 8},
+            })
+            progress_chart.set_chartarea({"border": {"none": True}})
+            progress_chart.set_plotarea({"border": {"color": "#D9E2F3"}})
+            progress_chart.set_size({"width": 720, "height": 330})
+            # The chart source is stored in hidden helper columns T:W. Excel
+            # excludes hidden-cell values unless this chart option is enabled.
+            progress_chart.show_hidden_data()
+            worksheet.insert_chart(6, 0, progress_chart)
+        elif not area_df.empty:
+            worksheet.write(6, 0, "本區目前沒有待處理工程。")
+
+        worksheet.set_column(
+            ranking_start_column,
+            ranking_start_column + 3,
+            None,
+            None,
+            {"hidden": True},
+        )
+
+        last_data_row = header_row + max(len(area_df), 0)
+        if month_columns and not area_df.empty:
+            first_month_column = export_columns.index(month_columns[0])
+            last_month_column = export_columns.index(month_columns[-1])
+            first_data_row = header_row + 1
+            worksheet.conditional_format(
+                first_data_row,
+                first_month_column,
+                last_data_row,
+                last_month_column,
+                {
+                    "type": "cell",
+                    "criteria": "<",
+                    "value": 0.5,
+                    "format": heat_red_format,
+                },
+            )
+            worksheet.conditional_format(
+                first_data_row,
+                first_month_column,
+                last_data_row,
+                last_month_column,
+                {
+                    "type": "cell",
+                    "criteria": "between",
+                    "minimum": 0.5,
+                    "maximum": 0.999999,
+                    "format": heat_yellow_format,
+                },
+            )
+            worksheet.conditional_format(
+                first_data_row,
+                first_month_column,
+                last_data_row,
+                last_month_column,
+                {
+                    "type": "cell",
+                    "criteria": ">=",
+                    "value": 1,
+                    "format": heat_green_format,
+                },
+            )
+            worksheet.write(
+                header_row - 1,
+                0,
+                "完成率熱度：紅色低於 50%、黃色 50%～99%、綠色 100%、灰色為待料或無資料",
+                generated_format,
+            )
+        if export_columns:
+            worksheet.autofilter(
+                header_row,
+                0,
+                last_data_row,
+                len(export_columns) - 1,
+            )
+        worksheet.set_row(0, 26)
+        worksheet.set_row(header_row, 32)
+        for column_index, column_name in enumerate(export_columns):
+            if column_name == "工程名稱":
+                column_width = 30
+            elif column_name in {"區域", "年度"}:
+                column_width = 10
+            elif column_name == "廠區":
+                column_width = 14
+            else:
+                column_width = 15
+            worksheet.set_column(column_index, column_index, column_width)
+
+    workbook.close()
+    output.seek(0)
+    return output.getvalue()
+
+
+def parse_installation_record_date(value):
+    """將新版與舊版裝機日期統一轉成 date。"""
+    if value is None or str(value).strip() == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    parsed_value = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed_value):
+        return None
+    return parsed_value.date()
+
+
+def split_installer_names(value):
+    """拆分裝機紀錄中的多人姓名。"""
+    return [
+        name.strip()
+        for name in re.split(r"[,，、;/／\s]+", str(value or ""))
+        if name.strip()
+    ]
+
+
+def build_monthly_attendance_summary(
+    selected_year,
+    selected_month,
+    installer_names,
+    installation_records,
+    today_date=None,
+):
+    """以工作日及裝機紀錄計算每位人員的未出勤日期。"""
+    selected_year = int(selected_year)
+    selected_month = int(selected_month)
+    today_date = today_date or date.today()
+    month_start = date(selected_year, selected_month, 1)
+    month_end = date(
+        selected_year,
+        selected_month,
+        calendar.monthrange(selected_year, selected_month)[1],
+    )
+    taiwan_holidays = holidays.country_holidays(
+        "TW",
+        years=[selected_year],
+        observed=True,
+        language="zh_TW",
+    )
+    month_dates = [
+        date(selected_year, selected_month, day)
+        for day in range(1, month_end.day + 1)
+    ]
+    weekend_dates = [day for day in month_dates if day.weekday() >= 5]
+    weekday_holidays = [
+        day for day in month_dates
+        if day.weekday() < 5 and day in taiwan_holidays
+    ]
+    work_dates = [
+        day for day in month_dates
+        if day.weekday() < 5 and day not in taiwan_holidays
+    ]
+    checked_work_dates = [day for day in work_dates if day <= today_date]
+
+    normalized_installers = [
+        str(name).strip() for name in installer_names if str(name).strip()
+    ]
+    attendance_dates = {name: set() for name in normalized_installers}
+    for record in installation_records:
+        record_date = parse_installation_record_date(
+            record.get("裝機日期", "") or record.get("日期", "")
+        )
+        if record_date not in checked_work_dates:
+            continue
+        for installer_name in split_installer_names(record.get("安裝人員", "")):
+            if installer_name in attendance_dates:
+                attendance_dates[installer_name].add(record_date)
+
+    summary_rows = []
+    for installer_name in normalized_installers:
+        present_dates = attendance_dates[installer_name]
+        missing_dates = [
+            work_date for work_date in checked_work_dates
+            if work_date not in present_dates
+        ]
+        summary_rows.append({
+            "姓名": installer_name,
+            "整月應出勤天數": len(work_dates),
+            "截至統計日應出勤天數": len(checked_work_dates),
+            "有裝機紀錄天數": len(present_dates),
+            "未出勤天數": len(missing_dates),
+            "未出勤日期": "、".join(
+                missing_date.strftime("%m/%d") for missing_date in missing_dates
+            ) or "—",
+        })
+
+    holiday_details = [
+        {
+            "日期": holiday_date,
+            "名稱": str(taiwan_holidays.get(holiday_date, "國定假日")),
+        }
+        for holiday_date in weekday_holidays
+    ]
+    return pd.DataFrame(summary_rows), {
+        "月份開始": month_start,
+        "月份結束": month_end,
+        "統計截止日": min(today_date, month_end),
+        "整月天數": len(month_dates),
+        "週六日天數": len(weekend_dates),
+        "平日國定假日天數": len(weekday_holidays),
+        "整月應出勤天數": len(work_dates),
+        "截至統計日應出勤天數": len(checked_work_dates),
+        "國定假日明細": holiday_details,
+    }
+
+
+def render_monthly_attendance_panel():
+    """在報告專區顯示每月應出勤與未出勤日期。"""
+    st.markdown("### 每月未出勤統計")
+    st.caption(
+        "依新版及舊版裝機紀錄判定；應出勤日會扣除星期六、星期日及台灣國定假日。"
+    )
+    try:
+        attendance_records = [
+            *load_production_installation_records(),
+            *load_new_installation_records(),
+        ]
+    except Exception as error:
+        st.error(f"裝機資料讀取失敗：{error}")
         return
 
+    today_date = date.today()
+    available_years = {today_date.year}
+    for record in attendance_records:
+        record_date = parse_installation_record_date(
+            record.get("裝機日期", "") or record.get("日期", "")
+        )
+        if record_date:
+            available_years.add(record_date.year)
+
+    filter_col1, filter_col2 = st.columns(2)
+    sorted_years = sorted(available_years, reverse=True)
+    with filter_col1:
+        selected_year = st.selectbox(
+            "年份",
+            sorted_years,
+            index=sorted_years.index(today_date.year),
+            key="report_attendance_year",
+        )
+    with filter_col2:
+        selected_month = st.selectbox(
+            "月份",
+            list(range(1, 13)),
+            index=today_date.month - 1,
+            format_func=lambda month: f"{month} 月",
+            key="report_attendance_month",
+        )
+
+    attendance_df, attendance_info = build_monthly_attendance_summary(
+        selected_year,
+        selected_month,
+        installers_list,
+        attendance_records,
+        today_date=today_date,
+    )
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+    with metric_col1:
+        st.metric("整月日數", attendance_info["整月天數"])
+    with metric_col2:
+        st.metric("扣除週六、週日", attendance_info["週六日天數"])
+    with metric_col3:
+        st.metric("扣除平日國定假日", attendance_info["平日國定假日天數"])
+    with metric_col4:
+        st.metric("整月應出勤天數", attendance_info["整月應出勤天數"])
+
+    selected_period_end = attendance_info["月份結束"]
+    if selected_period_end > today_date:
+        if attendance_info["月份開始"] > today_date:
+            st.info("所選月份尚未開始，因此目前不列出未出勤日期。")
+        else:
+            st.info(
+                f"未出勤日期目前統計至 {today_date.strftime('%Y/%m/%d')}；"
+                "尚未到的工作日不會提前列為未出勤。"
+            )
+
+    holiday_details = attendance_info["國定假日明細"]
+    if holiday_details:
+        holiday_text = "、".join(
+            f"{item['日期'].strftime('%m/%d')} {item['名稱']}"
+            for item in holiday_details
+        )
+        st.caption(f"本月扣除的平日國定假日：{holiday_text}")
+    else:
+        st.caption("本月沒有落在星期一至星期五的國定假日。")
+
+    st.dataframe(
+        attendance_df,
+        hide_index=True,
+        use_container_width=True,
+        height=min(420, 80 + max(len(attendance_df), 1) * 38),
+        column_config={
+            "未出勤日期": st.column_config.TextColumn("未出勤日期", width="large"),
+        },
+    )
+
+
+def render_report_area():
+    """顯示 Google Sheets 雲端報告資料的連動搜尋與維護功能。"""
+    st.subheader("📊 報告專區")
+    st.caption(
+        "資料來源：Google 試算表「報告資料」；"
+        "區域、廠區與工程名稱會依序連動篩選。"
+    )
+
     try:
-        base_report_df = load_report_data(
-            str(REPORT_DATA_FILE),
-            REPORT_DATA_FILE.stat().st_mtime_ns,
-        )
-        added_report_df = load_report_entry_records()
+        migrated_count = migrate_report_data_to_google_sheets()
+        if migrated_count:
+            st.success(
+                f"已將 {migrated_count} 筆既有報告資料搬移至 Google 試算表。"
+            )
+        report_df = load_report_entry_records()
         active_report_month = load_report_active_month()
-        report_df = pd.concat(
-            [frame for frame in [base_report_df, added_report_df] if not frame.empty],
-            ignore_index=True,
-            sort=False,
-        )
         report_df = report_df.drop_duplicates(
-            subset=["區域", "廠區", "工程名稱"],
+            subset=["年度", "區域", "廠區", "工程名稱"],
             keep="last",
         ).reset_index(drop=True)
     except Exception as e:
@@ -551,7 +1508,7 @@ def render_report_area():
         return
 
     if report_df.empty:
-        st.info("Excel 中沒有可顯示的工程明細。")
+        st.info("Google 試算表「報告資料」中沒有可顯示的工程明細。")
         return
 
     if st.session_state.report_flash_message:
@@ -898,7 +1855,7 @@ def render_report_area():
             display_df[count_column] = display_df[count_column].astype(int)
 
     preferred_columns = [
-        "區域", "廠區", "工程名稱",
+        "年度", "區域", "廠區", "工程名稱",
         *REPORT_COUNT_COLUMNS,
         *report_month_columns,
     ]
@@ -912,6 +1869,55 @@ def render_report_area():
         hide_index=True,
         use_container_width=True,
         height=min(700, 80 + max(len(display_df), 1) * 35),
+    )
+
+    st.divider()
+    render_monthly_attendance_panel()
+
+    st.divider()
+    st.markdown("### 📥 報告統計 Excel 匯出")
+    available_report_years = sorted(
+        {
+            int(year_value)
+            for year_value in pd.to_numeric(
+                report_df.get("年度", pd.Series(dtype=float)),
+                errors="coerce",
+            ).dropna()
+        },
+        reverse=True,
+    )
+    if not available_report_years:
+        available_report_years = [datetime.now().year]
+    selected_export_year = st.selectbox(
+        "選擇匯出年度",
+        available_report_years,
+        key="report_statistics_export_year",
+    )
+    selected_year_count = int(
+        pd.to_numeric(report_df["年度"], errors="coerce")
+        .eq(selected_export_year)
+        .sum()
+    )
+    st.caption(
+        f"將匯出 {selected_export_year} 年共 {selected_year_count} 筆工程；"
+        "北、中、南、國外各自使用獨立分頁，並在分頁內附上所有工程的月份完成率折線圖。"
+    )
+    report_excel_data = build_report_statistics_excel(
+        report_df,
+        selected_export_year,
+    )
+    st.download_button(
+        f"下載 {selected_export_year} 年報告統計 Excel",
+        data=report_excel_data,
+        file_name=(
+            f"{selected_export_year}年報告統計_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        ),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        use_container_width=True,
+        key="report_statistics_excel_download",
+        help="依所選年度匯出全部工程，並分成北、中、南、國外四個工作表。",
     )
 
     render_installation_excel_version_area()
