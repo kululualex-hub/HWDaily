@@ -1001,9 +1001,15 @@ def report_completion_rate_number(value):
     return min(numeric_value, 1.0)
 
 
-def build_report_statistics_excel(report_df, report_year):
-    """建立指定年度、依區域分頁且含各工程折線圖的報告 Excel。"""
+def build_report_statistics_excel(report_df, report_year, completion_targets=None):
+    """建立指定年度的全體及分區報告，套用各自的折線圖標準線。"""
     report_year = int(report_year)
+    targets = dict(REPORT_COMPLETION_TARGETS)
+    if completion_targets is not None:
+        targets.update(completion_targets)
+    for target in targets.values():
+        if target is not None and not 0 <= float(target) <= 1:
+            raise ValueError("標準完成率必須介於 0% 與 100% 之間。")
     if "年度" in report_df.columns:
         report_year_values = pd.to_numeric(report_df["年度"], errors="coerce")
         report_df = report_df[report_year_values.eq(report_year)].copy()
@@ -1142,7 +1148,9 @@ def build_report_statistics_excel(report_df, report_year):
     ]
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    for area_name in REPORT_AREA_ORDER:
+    for area_name in ["全體", *REPORT_AREA_ORDER]:
+        is_overall = area_name == "全體"
+        scope_label = "全體" if is_overall else ("國外" if area_name == "國外" else f"{area_name}區")
         worksheet = workbook.add_worksheet(area_name)
         worksheet.hide_gridlines(2)
         worksheet.set_landscape()
@@ -1152,12 +1160,17 @@ def build_report_statistics_excel(report_df, report_year):
         last_column_index = max(len(export_columns) - 1, 0)
         worksheet.merge_range(
             0, 0, 0, last_column_index,
-            f"{report_year} 年 {area_name}區工程統計",
+            f"{report_year} 年 {scope_label}工程統計",
             title_format,
         )
         worksheet.write(1, 0, f"產生時間：{generated_at}", generated_format)
+        worksheet.write(
+            2, 0,
+            "月份總完成率依工程月份完成率、目前已出貨數量加權；空白與待料不納入。",
+            generated_format,
+        )
 
-        area_df = report_df[
+        area_df = report_df.copy() if is_overall else report_df[
             report_df.get("區域", pd.Series(index=report_df.index, dtype=str))
             .fillna("").astype(str).str.strip().eq(area_name)
         ].copy()
@@ -1188,7 +1201,7 @@ def build_report_statistics_excel(report_df, report_year):
         # Reserve two vertically stacked chart areas before the project detail table.
         # Keeping both charts in column A avoids hiding the project chart outside the
         # user's current Excel viewport on narrower screens.
-        header_row = 49
+        header_row = 30 if is_overall else 49
         for column_index, column_name in enumerate(export_columns):
             worksheet.write(header_row, column_index, column_name, header_format)
 
@@ -1250,9 +1263,10 @@ def build_report_statistics_excel(report_df, report_year):
                         text_format,
                     )
 
-        summary_header_row = 44
-        summary_value_row = 45
-        target_value_row = 46
+        chart_row = 6 if is_overall else 25
+        summary_header_row = 25 if is_overall else 44
+        summary_value_row = summary_header_row + 1
+        target_value_row = summary_header_row + 2
         if month_columns and not area_df.empty:
             total_completion_values = []
             for month_column in month_columns:
@@ -1312,7 +1326,7 @@ def build_report_statistics_excel(report_df, report_year):
                         average_value_format,
                     )
 
-            completion_target = REPORT_COMPLETION_TARGETS.get(area_name)
+            completion_target = targets.get(area_name)
             if completion_target is not None:
                 worksheet.write(
                     target_value_row,
@@ -1353,6 +1367,7 @@ def build_report_statistics_excel(report_df, report_year):
                         "fill": {"color": "#FFFFFF"},
                     },
                     "line": {"color": "#4472C4", "width": 2.5},
+                    "values_data": total_completion_values,
                     "data_labels": {
                         "value": True,
                         "position": "above",
@@ -1391,7 +1406,7 @@ def build_report_statistics_excel(report_df, report_year):
                         },
                     })
                 chart.set_title({
-                    "name": f"{report_year} 年 {area_name}區總完成率"
+                    "name": f"{report_year} 年 {scope_label}總完成率"
                 })
                 chart.set_x_axis({"name": "月份"})
                 chart.set_y_axis({
@@ -1410,15 +1425,15 @@ def build_report_statistics_excel(report_df, report_year):
                 chart.set_plotarea({"border": {"color": "#D9E2F3"}})
                 chart.set_size({"width": 720, "height": 330})
                 chart.show_blanks_as("gap")
-                worksheet.insert_chart(25, 0, chart)
+                worksheet.insert_chart(chart_row, 0, chart)
             else:
-                worksheet.write(25, 0, "本區目前沒有可繪製的月份完成率資料。")
+                worksheet.write(chart_row, 0, "目前沒有可繪製的月份完成率資料。")
         else:
-            worksheet.write(25, 0, "本區目前沒有工程資料。")
+            worksheet.write(chart_row, 0, "目前沒有工程資料。")
 
         ranking_start_column = len(export_columns) + 1
         ranking_header_row = 0
-        ranking_df = area_df.copy()
+        ranking_df = area_df.iloc[:0].copy() if is_overall else area_df.copy()
         if not ranking_df.empty:
             for progress_column in ["已安裝", "已出貨待安裝"]:
                 progress_values = (
@@ -1609,7 +1624,7 @@ def build_report_statistics_excel(report_df, report_year):
             # excludes hidden-cell values unless this chart option is enabled.
             progress_chart.show_hidden_data()
             worksheet.insert_chart(6, 0, progress_chart)
-        elif not area_df.empty:
+        elif not area_df.empty and not is_overall:
             worksheet.write(6, 0, "本區目前沒有待處理工程。")
 
         worksheet.set_column(
@@ -2335,11 +2350,28 @@ def render_report_area():
     )
     st.caption(
         f"將匯出 {selected_export_year} 年共 {selected_year_count} 筆工程；"
-        "北、中、南、國外各自使用獨立分頁，並在分頁內附上所有工程的月份完成率折線圖。"
+        "包含全體、北、中、南、國外五個分頁，附各範圍的總完成率折線圖與工程明細。"
     )
+    st.markdown("#### 折線圖標準線設定")
+    st.caption("可分別啟用或關閉標準線，設定值只影響本次匯出，不會更改報告資料。")
+    export_targets = {}
+    for target_column, scope in zip(st.columns(5), ["全體", *REPORT_AREA_ORDER]):
+        with target_column:
+            enabled = st.checkbox(
+                f"{scope}標準線", value=scope != "全體",
+                key=f"report_target_enabled_{scope}",
+            )
+            target_percent = st.number_input(
+                f"{scope}標準完成率（%）", min_value=0, max_value=100,
+                value=round(REPORT_COMPLETION_TARGETS.get(scope, 0.75) * 100),
+                step=1, disabled=not enabled,
+                key=f"report_target_percent_{scope}",
+            )
+            export_targets[scope] = target_percent / 100 if enabled else None
     report_excel_data = build_report_statistics_excel(
         report_df,
         selected_export_year,
+        completion_targets=export_targets,
     )
     st.download_button(
         f"下載 {selected_export_year} 年報告統計 Excel",
@@ -2352,7 +2384,7 @@ def render_report_area():
         type="primary",
         use_container_width=True,
         key="report_statistics_excel_download",
-        help="依所選年度匯出全部工程，並分成北、中、南、國外四個工作表。",
+        help="依所選年度匯出全部工程，分成全體、北、中、南、國外五個工作表，套用各自的標準線設定。",
     )
 
     render_installation_excel_version_area()
