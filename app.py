@@ -1420,7 +1420,7 @@ def build_report_statistics_excel(report_df, report_year):
         ranking_header_row = 0
         ranking_df = area_df.copy()
         if not ranking_df.empty:
-            for progress_column in ["已安裝", "已出貨待安裝", "未出貨"]:
+            for progress_column in ["已安裝", "已出貨待安裝"]:
                 progress_values = (
                     ranking_df[progress_column]
                     if progress_column in ranking_df.columns
@@ -1430,9 +1430,7 @@ def build_report_statistics_excel(report_df, report_year):
                     progress_values,
                     errors="coerce",
                 ).fillna(0)
-            ranking_df["_待處理數量"] = (
-                ranking_df["已出貨待安裝"] + ranking_df["未出貨"]
-            )
+            ranking_df["_待處理數量"] = ranking_df["已出貨待安裝"]
             ranking_df["_訂單排序"] = pd.to_numeric(
                 ranking_df.get("訂單數量", 0),
                 errors="coerce",
@@ -1474,16 +1472,15 @@ def build_report_statistics_excel(report_df, report_year):
 
         if not ranking_df.empty:
             max_progress_total = float(
-                ranking_df[["已安裝", "已出貨待安裝", "未出貨"]]
+                ranking_df[["已安裝", "已出貨待安裝"]]
                 .sum(axis=1)
                 .max()
             )
-            completion_label_spacer = max(2.5, max_progress_total * 0.08)
+            completion_label_spacer = max(4.0, max_progress_total * 0.12)
             ranking_headers = [
                 "工程",
                 "已安裝",
                 "已出貨待安裝",
-                "未出貨",
                 "完成率標籤位置",
             ]
             for helper_offset, helper_header in enumerate(ranking_headers):
@@ -1503,7 +1500,7 @@ def build_report_statistics_excel(report_df, report_year):
                     progress_record["_工程標籤"],
                 )
                 for helper_offset, progress_column in enumerate(
-                    ["已安裝", "已出貨待安裝", "未出貨"],
+                    ["已安裝", "已出貨待安裝"],
                     start=1,
                 ):
                     worksheet.write_number(
@@ -1516,7 +1513,7 @@ def build_report_statistics_excel(report_df, report_year):
                 # overlapping the final colored series.
                 worksheet.write_number(
                     ranking_header_row + helper_row_offset,
-                    ranking_start_column + 4,
+                    ranking_start_column + 3,
                     completion_label_spacer,
                 )
 
@@ -1528,7 +1525,6 @@ def build_report_statistics_excel(report_df, report_year):
             for progress_name, progress_offset, progress_color in [
                 ("已安裝", 1, "#70AD47"),
                 ("已出貨待安裝", 2, "#FFC000"),
-                ("未出貨", 3, "#C00000"),
             ]:
                 progress_chart.add_series({
                     "name": progress_name,
@@ -1573,9 +1569,9 @@ def build_report_statistics_excel(report_df, report_year):
                 "values": [
                     area_name,
                     ranking_header_row + 1,
-                    ranking_start_column + 4,
+                    ranking_start_column + 3,
                     ranking_last_row,
-                    ranking_start_column + 4,
+                    ranking_start_column + 3,
                 ],
                 "fill": {"none": True},
                 "border": {"none": True},
@@ -1586,7 +1582,7 @@ def build_report_statistics_excel(report_df, report_year):
                 },
             })
             progress_chart.set_title({
-                "name": "待處理工程進度與最新完成率（前 10 名）",
+                "name": "已出貨工程進度與最新完成率（前 10 名）",
             })
             progress_chart.set_x_axis({
                 "name": "數量（台）",
@@ -1603,13 +1599,13 @@ def build_report_statistics_excel(report_df, report_year):
             })
             progress_chart.set_legend({
                 "position": "bottom",
-                "delete_series": [3],
+                "delete_series": [2],
                 "font": {"name": "Arial", "size": 8},
             })
             progress_chart.set_chartarea({"border": {"none": True}})
             progress_chart.set_plotarea({"border": {"color": "#D9E2F3"}})
             progress_chart.set_size({"width": 720, "height": 330})
-            # The chart source is stored in hidden helper columns T:W. Excel
+            # The chart source is stored in hidden helper columns. Excel
             # excludes hidden-cell values unless this chart option is enabled.
             progress_chart.show_hidden_data()
             worksheet.insert_chart(6, 0, progress_chart)
@@ -1618,7 +1614,7 @@ def build_report_statistics_excel(report_df, report_year):
 
         worksheet.set_column(
             ranking_start_column,
-            ranking_start_column + 4,
+            ranking_start_column + 3,
             None,
             None,
             {"hidden": True},
@@ -2542,7 +2538,13 @@ def delete_new_installation_record(record):
     return target_row_number
 
 
-def complete_matching_new_installation_records(record, exclude_record_id=""):
+def installation_status_remark(record, status):
+    original = str(record.get("Remark", "") or "").strip()
+    note = f"[{datetime.now().strftime('%Y-%m-%d')}] 同廠區、案件、機台有新進度，自動改為{status}。"
+    return "\n".join(part for part in [original, note] if part)
+
+
+def complete_matching_new_installation_records(record, exclude_record_id="", target_status="已完成"):
     """完成相同廠別、案件與機台的新版紀錄，舊版則建立唯讀轉換紀錄。"""
     target_identity = (
         str(record.get("廠別", "")).strip().casefold(),
@@ -2562,14 +2564,15 @@ def complete_matching_new_installation_records(record, exclude_record_id=""):
         if (
             existing_identity != target_identity
             or str(existing_record.get("紀錄ID", "")) == str(exclude_record_id)
-            or str(existing_record.get("狀態", "")).strip() == "已完成"
+            or str(existing_record.get("狀態", "")).strip() in {"完成", "已完成", target_status}
         ):
             continue
         row_number = int(existing_record["_new_sheet_row"])
         changed_cells.extend([
             gspread.Cell(row_number, 3, now_text),
-            gspread.Cell(row_number, 10, "已完成"),
-            gspread.Cell(row_number, 11, ""),
+            gspread.Cell(row_number, 10, target_status),
+            gspread.Cell(row_number, 11, "" if target_status == "已完成" else existing_record.get("未完成或缺貨原因", "")),
+            gspread.Cell(row_number, 12, installation_status_remark(existing_record, target_status)),
             gspread.Cell(row_number, 14, operator),
         ])
         changed_count += 1
@@ -2604,15 +2607,16 @@ def complete_matching_new_installation_records(record, exclude_record_id=""):
         )
         if (
             legacy_identity != target_identity
-            or legacy_status in {"完成", "已完成"}
+            or legacy_status in {"完成", "已完成", target_status}
             or legacy_source_key in converted_legacy_keys
         ):
             continue
         converted_record = dict(legacy_record)
         converted_record.update({
             "紀錄ID": uuid.uuid4().hex,
-            "狀態": "已完成",
-            "未完成或缺貨原因": "",
+            "狀態": target_status,
+            "Remark": installation_status_remark(legacy_record, target_status),
+            "未完成或缺貨原因": "" if target_status == "已完成" else legacy_record.get("未完成或缺貨原因", ""),
             "來源版本": "舊版轉換",
             "來源鍵": legacy_source_key,
         })
@@ -7460,8 +7464,11 @@ def mark_previous_installation_in_progress(previous_record):
     )
 
     if existing_record:
+        if str(existing_record.get("狀態", "")).strip() in {"執行中", "完成", "已完成"}:
+            return str(existing_record.get("紀錄ID", "")).strip()
         updated_record = dict(existing_record)
         updated_record["狀態"] = "執行中"
+        updated_record["Remark"] = installation_status_remark(existing_record, "執行中")
         update_new_installation_record(existing_record, updated_record)
         return str(existing_record.get("紀錄ID", "")).strip()
 
@@ -7472,6 +7479,7 @@ def mark_previous_installation_in_progress(previous_record):
     converted_record.update({
         "紀錄ID": uuid.uuid4().hex,
         "狀態": "執行中",
+        "Remark": installation_status_remark(previous_record, "執行中"),
         "來源版本": "舊版轉換",
         "來源鍵": source_key,
     })
@@ -8462,14 +8470,22 @@ if tab2 is not None:
                                 batch_records,
                                 new_record_ids,
                             ):
+                                if test_record.get("狀態") != "已完成":
+                                    complete_matching_new_installation_records(
+                                        test_record,
+                                        exclude_record_id=new_record_id,
+                                        target_status="執行中",
+                                    )
                                 if test_record.get("狀態") == "已完成":
                                     try:
                                         complete_matching_new_installation_records(
                                             test_record,
                                             exclude_record_id=new_record_id,
                                         )
-                                    except Exception:
-                                        pass
+                                    except Exception as error:
+                                        sales_progress_messages.append(
+                                            f"相關歷史紀錄同步失敗：{error}"
+                                        )
                                     progress_message = apply_completed_installation_to_sales(
                                         test_record,
                                         new_record_id,
