@@ -4675,6 +4675,34 @@ def save_installation_excel_comparison(
     }
 
 
+def delete_installation_excel_comparison(comparison_id):
+    """刪除指定比較的全部列，不碰原始版本或報告資料。"""
+    if st.session_state.get("user_role") != "管理者":
+        raise PermissionError("只有管理者可以刪除比較紀錄。")
+    comparison_id = str(comparison_id or "").strip()
+    if not comparison_id:
+        raise ValueError("請先選擇要刪除的比較紀錄。")
+    worksheet = get_installation_comparison_worksheet()
+    # 重新讀取實際列號，不使用畫面或快取中的舊列號。
+    matching_rows = [
+        row_number for row_number, row in enumerate(worksheet.get_all_records(), start=2)
+        if str(row.get("比較ID", "")).strip() == comparison_id
+    ]
+    if matching_rows:
+        # 清除整筆紀錄而不搬移列，避免其他使用者已選取的項目列號偏移。
+        worksheet.batch_clear([f"A{row_number}:M{row_number}" for row_number in matching_rows])
+    load_installation_excel_comparisons.clear()
+    load_unrecorded_installation_items.clear()
+    result = st.session_state.get("installation_excel_last_result") or {}
+    if result.get("比較ID") == comparison_id:
+        st.session_state.installation_excel_last_result = None
+    # 清除本頁尚未提交的選取，避免繼續處理已刪除的結果。
+    st.session_state.installation_unrecorded_pending = None
+    for key in ["installation_unrecorded_dialog_key", "installation_unrecorded_grid_key"]:
+        st.session_state[key] = st.session_state.get(key, 0) + 1
+    return len(matching_rows)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_installation_excel_comparisons():
     """載入所有已永久保存的 Excel 比較結果。"""
@@ -5418,6 +5446,9 @@ def render_installation_excel_version_area():
     """記錄客戶訂單明細版本，依 PM-0001-00 關聯訂單比較。"""
     st.divider()
     st.markdown("#### 客戶訂單明細 Excel 比較")
+    deletion_message = st.session_state.pop("installation_comparison_delete_flash", "")
+    if deletion_message:
+        st.success(deletion_message)
     st.caption(
         "先找出品號 PM-0001-00，再忽略訂單末四碼，記錄所有同訂單主號的項目；"
         "第二次起自動與上一份檔案比較。比較結果永久保存，原始解析資料只保留最新一版。"
@@ -5615,6 +5646,30 @@ def render_installation_excel_version_area():
                 selected_comparison,
                 f"history_comparison_{selected_comparison['比較ID']}",
             )
+            if st.session_state.get("user_role") == "管理者":
+                selected_id = selected_comparison["比較ID"]
+                st.warning(
+                    "刪除會移除此比較的新增、刪除、數量變更結果及未紀錄項目，無法直接復原。"
+                    "原始 Excel 比較基準與已寫入報告的統計數量不受影響。"
+                )
+                confirmed = st.checkbox(
+                    "我確認刪除以上選取的整次比較紀錄",
+                    key=f"comparison_delete_confirm_{selected_id}",
+                )
+                if st.button(
+                    "刪除這次比較紀錄", disabled=not confirmed,
+                    key=f"comparison_delete_{selected_id}",
+                ):
+                    try:
+                        deleted_count = delete_installation_excel_comparison(selected_id)
+                    except Exception as error:
+                        st.error(f"刪除比較紀錄失敗：{error}")
+                    else:
+                        st.session_state.installation_comparison_delete_flash = (
+                            f"已刪除比較 {selected_id} 及其結果。"
+                            if deleted_count else "此比較紀錄已不存在，清單已更新。"
+                        )
+                        st.rerun()
 
 
 def find_product_project_mapping(product_name):
