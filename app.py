@@ -4692,7 +4692,7 @@ def save_installation_excel_comparison(
     }
 
 
-def delete_installation_excel_comparison(comparison_id):
+def delete_installation_excel_comparison(comparison_id, previous_filename="", previous_file_bytes=None):
     """撤回最新比較及新版基準；同一次批次更新保留前版，不更動報告統計。"""
     if st.session_state.get("user_role") != "管理者":
         raise PermissionError("只有管理者可以刪除比較紀錄。")
@@ -4712,6 +4712,14 @@ def delete_installation_excel_comparison(comparison_id):
         current_id = str(selected.get("新版本ID", "")).strip()
         if not previous_id or not current_id or previous_id == current_id:
             raise ValueError("比較紀錄缺少有效的前版／新版編號，無法安全回復。")
+        expected_filename = str(selected.get("前版檔名", "")).strip()
+        if not expected_filename or previous_filename != expected_filename:
+            raise ValueError(f"上一版檔名不符，請上傳：{expected_filename or '（紀錄缺少前版檔名）'}")
+        if not previous_file_bytes or len(previous_file_bytes) > 10 * 1024 * 1024:
+            raise ValueError("請附上上一版原始 Excel，檔案不可超過 10 MB。")
+        restored_data = parse_installation_excel(previous_file_bytes)["資料"]
+        if not restored_data:
+            raise ValueError("上一版 Excel 沒有符合規則的資料，未執行刪除。")
         if any(
             str(row.get("前版ID", "")).strip() == current_id
             and str(row.get("比較ID", "")).strip() != comparison_id
@@ -4733,23 +4741,31 @@ def delete_installation_excel_comparison(comparison_id):
         )
         if str(latest_row.get("版本ID", "")).strip() != current_id:
             raise ValueError("選取的比較不是目前保留的最新版本，請先撤回最新比較。")
-        if not any(
-            str(row.get("版本ID", "")).strip() == previous_id
-            and str(row.get("紀錄類型", "")).strip() == "資料"
-            and str(row.get("工作表", "")) == "已確認，未結案"
-            for _, row in stream_rows
-        ):
-            raise ValueError("上一版資料已被舊程式清除，無法自動回復。請先補回上一版原始 Excel；此次未刪除任何資料。")
+        previous_metadata = next((row for _, row in stream_rows
+                                  if str(row.get("版本ID", "")).strip() == previous_id), {})
+        previous_time = str(previous_metadata.get("上傳時間", "")).strip()
+        if not previous_time:
+            previous_time = datetime.strptime(previous_id, "%Y%m%d%H%M%S%f").strftime("%Y-%m-%d %H:%M:%S.%f")
         remaining_latest = max(
-            (row for _, row in stream_rows if str(row.get("版本ID", "")).strip() != current_id),
+            (row for _, row in stream_rows if str(row.get("版本ID", "")).strip() not in {current_id, previous_id}),
             key=lambda row: (str(row.get("上傳時間", "")), str(row.get("版本ID", ""))),
+            default={},
         )
-        if str(remaining_latest.get("版本ID", "")).strip() != previous_id:
+        if (str(remaining_latest.get("上傳時間", "")), str(remaining_latest.get("版本ID", ""))) >= (previous_time, previous_id):
             raise ValueError("版本順序與比較紀錄不一致，無法安全回復；此次未刪除任何資料。")
         current_rows = [number for number, row in stream_rows
-                        if str(row.get("版本ID", "")).strip() == current_id]
+                        if str(row.get("版本ID", "")).strip() in {current_id, previous_id}]
+        uploader = str(previous_metadata.get("上傳者", "")) or f"{st.session_state.user_name}（補回前版）"
+        base = [previous_id, "版本資訊", previous_time, uploader, "客戶訂單明細表",
+                INSTALLATION_TARGET_PART_NUMBER, expected_filename]
+        restored_rows = [[*base, "", "", "", ""]] + [
+            [previous_id, "資料", previous_time, uploader, "客戶訂單明細表",
+             INSTALLATION_TARGET_PART_NUMBER, expected_filename, row["工作表"],
+             row["Excel列"], row["資料JSON"], row["內容"]]
+            for row in restored_data
+        ]
         # 同一試算表的原子批次清除，避免只刪比較或只回復基準；不搬移列號。
-        worksheet.spreadsheet.batch_update({"requests": [
+        requests = [
             {"updateCells": {"range": {
                 "sheetId": sheet_id, "startRowIndex": number - 1,
                 "endRowIndex": number, "startColumnIndex": 0, "endColumnIndex": width,
@@ -4757,7 +4773,13 @@ def delete_installation_excel_comparison(comparison_id):
             for sheet_id, numbers, width in [
                 (worksheet.id, matching_rows, 13), (version_sheet.id, current_rows, 11)
             ] for number in numbers
-        ]})
+        ]
+        requests.append({"appendCells": {
+            "sheetId": version_sheet.id, "fields": "userEnteredValue",
+            "rows": [{"values": [{"userEnteredValue": {"stringValue": str(value)}}
+                                 for value in row]} for row in restored_rows],
+        }})
+        worksheet.spreadsheet.batch_update({"requests": requests})
     load_installation_excel_versions.clear()
     load_installation_excel_comparisons.clear()
     load_unrecorded_installation_items.clear()
@@ -5709,18 +5731,31 @@ def render_installation_excel_version_area():
                 selected_id = selected_comparison["比較ID"]
                 st.warning(
                     "僅能從最新比較依序撤回：刪除本次結果、未紀錄項目與新版基準，回復到前版。"
-                    "已寫入報告的統計數量不受影響。前版資料不存在時會停止刪除。"
+                    "請附上檔名完全相符的上一版 Excel，以補回比較基準。已寫入報告的統計數量不受影響。"
                 )
+                st.caption(f"應上傳的上一版檔名：{selected_comparison['前版檔名']}")
+                previous_upload = st.file_uploader(
+                    "刪除時附上上一版本 Excel", type=["xlsx", "xlsm"],
+                    key=f"comparison_restore_file_{selected_id}",
+                )
+                filename_matches = (
+                    previous_upload is not None
+                    and previous_upload.name == selected_comparison["前版檔名"]
+                )
+                if previous_upload is not None and not filename_matches:
+                    st.error("檔名與比較紀錄的前版檔名不同，無法刪除。請選擇原始上一版檔案。")
                 confirmed = st.checkbox(
                     "我確認刪除此比較並將基準回復至上一版",
                     key=f"comparison_delete_confirm_{selected_id}",
                 )
                 if st.button(
-                    "刪除比較並回復上一版", disabled=not confirmed,
+                    "刪除比較並回復上一版", disabled=not confirmed or not filename_matches,
                     key=f"comparison_delete_{selected_id}",
                 ):
                     try:
-                        deleted_count = delete_installation_excel_comparison(selected_id)
+                        deleted_count = delete_installation_excel_comparison(
+                            selected_id, previous_upload.name, previous_upload.getvalue(),
+                        )
                     except Exception as error:
                         st.error(f"刪除比較紀錄失敗：{error}")
                     else:
