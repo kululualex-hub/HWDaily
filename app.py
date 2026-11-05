@@ -4207,12 +4207,14 @@ def find_installation_header_indexes(header_values):
 
 
 def parse_installation_excel(file_bytes):
-    """依 PM-0001-00 找出訂單主號，再擷取所有同訂單項目。"""
+    """只讀取「已確認，未結案」，依 PM-0001-00 擷取同訂單主號項目。"""
     workbook = load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
     source_rows = []
     matched_sheet_names = []
     try:
-        for sheet in workbook.worksheets:
+        if "已確認，未結案" not in workbook.sheetnames:
+            raise ValueError("找不到「已確認，未結案」分頁，請確認 Excel 分頁名稱完全相符。")
+        for sheet in [workbook["已確認，未結案"]]:
             if sheet.max_row > 20000 or sheet.max_column > 500:
                 raise ValueError(
                     f"工作表「{sheet.title}」範圍過大（{sheet.max_row} 列、"
@@ -4259,7 +4261,7 @@ def parse_installation_excel(file_bytes):
 
     if not matched_sheet_names:
         raise ValueError(
-            "找不到包含「日期、訂單、客戶簡稱、業務員名稱、品號、品名、"
+            "「已確認，未結案」分頁找不到包含「日期、訂單、客戶簡稱、業務員名稱、品號、品名、"
             "訂單數量、未交數量、已交數量」的工作表。"
         )
 
@@ -4358,13 +4360,28 @@ def load_installation_excel_versions(order_number, part_number):
             "工作表列": [],
         })
         version["工作表列"].append(sheet_row_number)
-        if str(row.get("紀錄類型", "")).strip() == "資料":
+        if (
+            str(row.get("紀錄類型", "")).strip() == "資料"
+            and str(row.get("工作表", "")) == "已確認，未結案"
+        ):
             version["資料"].append({
                 "工作表": str(row.get("工作表", "")).strip(),
                 "Excel列": row.get("Excel列", ""),
                 "內容": str(row.get("顯示內容", "")).strip(),
                 "資料JSON": str(row.get("資料JSON", "")).strip(),
             })
+    # 舊基準可能曾跨分頁找 PM 品號；僅過濾工作表仍可能留下其他分頁帶入的主號。
+    for version in versions.values():
+        target_orders = {
+            normalize_order_number(data["訂單"])
+            for row in version["資料"]
+            for data in [installation_excel_display_row(row)]
+            if data["品號"].strip().upper() == INSTALLATION_TARGET_PART_NUMBER
+        }
+        version["資料"] = [
+            row for row in version["資料"]
+            if normalize_order_number(installation_excel_display_row(row)["訂單"]) in target_orders
+        ]
     return sorted(versions.values(), key=lambda version: (version["上傳時間"], version["版本ID"]))
 
 
@@ -5450,7 +5467,7 @@ def render_installation_excel_version_area():
     if deletion_message:
         st.success(deletion_message)
     st.caption(
-        "先找出品號 PM-0001-00，再忽略訂單末四碼，記錄所有同訂單主號的項目；"
+        "僅核對「已確認，未結案」分頁。先找出品號 PM-0001-00，再忽略訂單末四碼，記錄所有同訂單主號的項目；"
         "第二次起自動與上一份檔案比較。比較結果永久保存，原始解析資料只保留最新一版。"
     )
 
@@ -5503,7 +5520,7 @@ def render_installation_excel_version_area():
     uploaded_excel = st.file_uploader(
         "選擇 Excel 檔案",
         type=["xlsx", "xlsm"],
-        help="支援 .xlsx 與 .xlsm；程式會自動尋找包含所需九個欄位的工作表。",
+        help="支援 .xlsx 與 .xlsm；只讀取名稱完全相符的「已確認，未結案」分頁，其餘分頁不納入。",
         key=f"installation_excel_upload_{st.session_state.installation_excel_uploader_key}",
     )
     if st.button(
