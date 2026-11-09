@@ -5296,6 +5296,13 @@ def show_unrecorded_report_dialog(report_df):
             st.rerun()
 
 
+def unrecorded_item_display_category(item):
+    """人力依品號獨立顯示，保留原始差異分類供後續統計使用。"""
+    if str(item.get("品號", "")).strip().upper() == "PM-0001-00":
+        return "人力"
+    return str(item.get("差異分類", ""))
+
+
 def render_unrecorded_installation_items_panel(report_df):
     """顯示未紀錄項目，勾選後依使用者確認決定是否更新報告統計。"""
     st.markdown("#### 📋 未紀錄項目")
@@ -5316,16 +5323,16 @@ def render_unrecorded_installation_items_panel(report_df):
         f"目前共有 {len(unrecorded_items)} 筆未紀錄項目。"
         "一次勾選一筆，系統會先詢問是否列入報告統計。"
     )
-    category_order = ["新增項目", "刪除項目", "數量變更"]
+    category_order = ["新增項目", "刪除項目", "數量變更", "人力"]
     category_counts = {
         category: sum(
-            item["差異分類"] == category
+            unrecorded_item_display_category(item) == category
             for item in unrecorded_items
         )
         for category in category_order
     }
     active_category = st.segmented_control(
-        "差異分類",
+        "項目分類",
         category_order,
         default=category_order[0],
         format_func=lambda category: f"{category}（{category_counts[category]}）",
@@ -5337,7 +5344,7 @@ def render_unrecorded_installation_items_panel(report_df):
     category_items = [
         item
         for item in unrecorded_items
-        if item["差異分類"] == active_category
+        if unrecorded_item_display_category(item) == active_category
     ]
     selected_rows = []
     if not category_items:
@@ -5348,6 +5355,7 @@ def render_unrecorded_installation_items_panel(report_df):
             editor_rows.append({
                 "勾選": False,
                 "工作表列": item["工作表列"],
+                "差異分類": item["差異分類"],
                 "比較時間": item["比較時間"],
                 "來源檔案": item["來源檔案"],
                 "訂單": item["訂單"],
