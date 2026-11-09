@@ -4827,10 +4827,15 @@ def load_installation_excel_comparisons():
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if isinstance(saved_record, dict):
+            report_inclusion = saved_record.pop("_報告統計", None)
             record_status = str(row.get("處理狀態", "")).strip()
             if record_status:
                 saved_record["紀錄狀態"] = record_status
             comparison[target_key].append(saved_record)
+            if (isinstance(report_inclusion, dict)
+                    and report_inclusion.get("列入統計") is True
+                    and record_status == "已記錄"):
+                comparison.setdefault("統計明細", {}).setdefault(target_key, []).append(dict(saved_record))
     return sorted(
         comparisons.values(),
         key=lambda comparison: (comparison["比較時間"], comparison["比較ID"]),
@@ -4896,7 +4901,7 @@ def load_unrecorded_installation_items():
     return unrecorded_items
 
 
-def mark_installation_items_recorded(sheet_rows):
+def mark_installation_items_recorded(sheet_rows, inclusion_details=None):
     """將指定比較紀錄列批次標記為已記錄。"""
     cleaned_rows = sorted({int(row_number) for row_number in sheet_rows})
     if not cleaned_rows:
@@ -4904,15 +4909,26 @@ def mark_installation_items_recorded(sheet_rows):
     comparison_worksheet = get_installation_comparison_worksheet()
     processed_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     processor = f"{st.session_state.user_name} ({st.session_state.user_role})"
+    records = comparison_worksheet.get_all_records()
+    updates = []
+    for row_number in cleaned_rows:
+        if row_number < 2 or row_number - 2 >= len(records):
+            raise ValueError("比較項目不存在，請重新整理後再操作。")
+        source = records[row_number - 2]
+        if not source.get("比較ID") or source.get("紀錄類型") not in {"新增項目", "刪除項目", "數量變更"}:
+            raise ValueError("比較項目已刪除或格式不符，未更新狀態。")
+        payload = json.loads(str(source.get("資料JSON", "")))
+        payload["_報告統計"] = {
+            **(inclusion_details or {}), "列入統計": inclusion_details is not None,
+            "處理時間": processed_time, "處理者": processor,
+        }
+        updates.append({"range": f"J{row_number}:M{row_number}", "values": [[
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            "已記錄", processed_time, processor,
+        ]]})
     comparison_worksheet.batch_update(
-        [
-            {
-                "range": f"K{row_number}:M{row_number}",
-                "values": [["已記錄", processed_time, processor]],
-            }
-            for row_number in cleaned_rows
-        ],
-        value_input_option="USER_ENTERED",
+        updates,
+        value_input_option="RAW",
     )
     load_unrecorded_installation_items.clear()
     load_installation_excel_comparisons.clear()
@@ -5254,7 +5270,10 @@ def show_unrecorded_report_dialog(report_df):
                             existing_record=existing_record,
                             action=f"差異統計（{item.get('差異分類', '')}）",
                         )
-                        mark_installation_items_recorded([sheet_row])
+                        mark_installation_items_recorded([sheet_row], inclusion_details={
+                            "區域": selected_area, "廠區": selected_plant_text,
+                            "工程名稱": selected_project_text,
+                        })
                     st.session_state.installation_unrecorded_pending = None
                     st.session_state.installation_unrecorded_flash = (
                         f"已更新報告：{selected_area}／{selected_plant_text}／"
@@ -5383,7 +5402,7 @@ def render_unrecorded_installation_items_panel(report_df):
         show_unrecorded_report_dialog(report_df)
 
 
-def build_installation_comparison_excel(comparison):
+def build_installation_comparison_excel(comparison, detail_only=False):
     """將單次比較結果輸出為含摘要、三種差異分頁的 Excel。"""
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {"in_memory": True})
@@ -5448,7 +5467,7 @@ def build_installation_comparison_excel(comparison):
                 elif "數量" in header and re.fullmatch(r"-?\d+(?:\.\d+)?", str(value)):
                     worksheet.write_number(row_index, column_index, float(value), integer_format)
                 else:
-                    worksheet.write(row_index, column_index, value, wrap_format)
+                    worksheet.write_string(row_index, column_index, str(value or ""), wrap_format)
         worksheet.freeze_panes(1, 0)
         if records:
             worksheet.autofilter(0, 0, len(records), len(headers) - 1)
@@ -5465,16 +5484,17 @@ def build_installation_comparison_excel(comparison):
                 width = 16
             worksheet.set_column(column_index, column_index, width)
 
+    detail_headers = ["日期", "訂單", "品名", "品號", "訂單數量", "未交數量", "已交數量"]
     write_detail_sheet(
         "新增項目",
         comparison["新增"],
-        [*INSTALLATION_ORDER_FIELDS, "紀錄狀態"],
+        detail_headers if detail_only else [*INSTALLATION_ORDER_FIELDS, "紀錄狀態"],
         "#548235",
     )
     write_detail_sheet(
         "刪除項目",
         comparison["刪除"],
-        [*INSTALLATION_ORDER_FIELDS, "紀錄狀態"],
+        detail_headers if detail_only else [*INSTALLATION_ORDER_FIELDS, "紀錄狀態"],
         "#C00000",
     )
     quantity_headers = [
@@ -5484,13 +5504,34 @@ def build_installation_comparison_excel(comparison):
     ]
     write_detail_sheet(
         "數量變更",
-        comparison["數量變更"],
-        [*quantity_headers, "紀錄狀態"],
+        [
+            {**record, **{field: record.get(f"新{field}", "")
+                         for field in INSTALLATION_QUANTITY_FIELDS}}
+            for record in comparison["數量變更"]
+        ] if detail_only else comparison["數量變更"],
+        detail_headers if detail_only else [*quantity_headers, "紀錄狀態"],
         "#BF9000",
     )
     workbook.close()
     output.seek(0)
     return output.getvalue()
+
+
+def build_saved_comparison_detail_excel(comparisons):
+    """匯出已保存的比較明細，不重複寫入、不依訂單去重或加總事件數量。"""
+    combined = {
+        "比較時間": "所選比較紀錄", "比較者": "",
+        "前版檔名": "請參閱原比較紀錄", "新版本檔名": f"共 {len(comparisons)} 次比較",
+        **{category: [dict(row) for comparison in comparisons
+                     for row in comparison.get("統計明細", {}).get(category, [])]
+           for category in ["新增", "刪除", "數量變更"]},
+    }
+    if len(comparisons) == 1:
+        combined.update({key: comparisons[0].get(key, "")
+                         for key in ["比較時間", "比較者", "前版檔名", "新版本檔名"]})
+    for category in ["新增", "刪除", "數量變更"]:
+        combined[category].sort(key=lambda row: (str(row.get("日期", "")), str(row.get("訂單", ""))))
+    return build_installation_comparison_excel(combined, detail_only=True)
 
 
 def render_installation_comparison_tables(comparison, key_prefix):
@@ -5553,6 +5594,31 @@ def render_installation_excel_version_area():
     except Exception as error:
         st.error(f"無法讀取 Excel 版本或比較紀錄：{error}")
         return
+
+    if comparison_history:
+        with st.expander("匯出列入統計的明細 Excel", expanded=False):
+            detail_scope = st.selectbox(
+                "選擇明細範圍", ["全部保留的比較紀錄", *[row["比較ID"] for row in comparison_history]],
+                format_func=lambda value: next((
+                    f"{row['比較時間']}｜{row['前版檔名']} → {row['新版本檔名']}"
+                    for row in comparison_history if row["比較ID"] == value
+                ), value),
+                key="comparison_detail_export_scope",
+            )
+            export_comparisons = comparison_history if detail_scope == "全部保留的比較紀錄" else [
+                row for row in comparison_history if row["比較ID"] == detail_scope
+            ]
+            st.caption(
+                "僅匯出選擇列入統計且已成功更新報告的項目。不列入、未處理及未保存列入標記的舊紀錄不匯出。"
+                "輸出日期、訂單、品名、品號、訂單數量、未交數量、已交數量；依新增、刪除、數量變更分頁。"
+                "數量變更採新版數量，刪除項目採刪除前數量。相同項目跨次比較會保留多筆，請勿視為現有訂單總量加總。"
+            )
+            st.download_button(
+                "下載列入統計的明細 Excel", data=build_saved_comparison_detail_excel(export_comparisons),
+                file_name=f"客戶訂單比較明細_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="comparison_detail_export_download",
+            )
 
     if versions:
         history_df = pd.DataFrame([
