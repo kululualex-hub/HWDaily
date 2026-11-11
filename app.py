@@ -5296,6 +5296,15 @@ def show_unrecorded_report_dialog(report_df):
             st.rerun()
 
 
+def installation_order_matches(record, query):
+    """訂單編號採部分文字比對，忽略空白與英文大小寫，不使用正規表示式。"""
+    def normalize(value):
+        return "" if value is None else "".join(str(value).split()).casefold()
+
+    keyword = normalize(query)
+    return not keyword or keyword in normalize(record.get("訂單", ""))
+
+
 def installation_order_fields(selected_order_record, manual_order_number):
     """保存手動訂單號碼；選取既有訂單時同時保留明確的業務關聯。"""
     if selected_order_record is not None:
@@ -8941,8 +8950,17 @@ with tab3:
                 key="dev_results_search_status",
             )
 
+        dev_search_order = st.text_input(
+            "訂單編號",
+            placeholder="輸入完整或部分訂單編號，留空代表全部",
+            help="可搭配其他條件搜尋；忽略空白及英文大小寫。",
+            key="dev_results_search_order",
+        )
+
         filtered_record_indices = []
         for record_index, record in enumerate(combined_results_records):
+            if not installation_order_matches(record, dev_search_order):
+                continue
             if (
                 dev_search_plant != "（全部）"
                 and str(record.get("廠別", "")).strip() != dev_search_plant
