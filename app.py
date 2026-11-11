@@ -2493,8 +2493,8 @@ def new_installation_row_values(record, existing_record=None):
         str(record.get("照片檔名") or existing_record.get("照片檔名") or ""),
         str(record.get("照片連結") or existing_record.get("照片連結") or ""),
         str(record.get("照片ID") or existing_record.get("照片ID") or ""),
-        str(record.get("訂單") or existing_record.get("訂單") or ""),
-        str(record.get("業務紀錄ID") or existing_record.get("業務紀錄ID") or ""),
+        str(record.get("訂單", existing_record.get("訂單", "")) or ""),
+        str(record.get("業務紀錄ID", existing_record.get("業務紀錄ID", "")) or ""),
     ]
 
 
@@ -7255,8 +7255,14 @@ def show_details_dialog(
             edited_installers = str(row_data.get("安裝人員", "")).strip()
             edited_checklist = str(row_data.get("項目確認", "")).strip()
             edited_remark = str(row_data.get("Remark", "")).strip()
+            edited_order = str(row_data.get("訂單", "")).strip()
 
             if allow_full_edit:
+                edited_order = st.text_input(
+                    "訂單編號（選填）", value=edited_order,
+                    key=f"dev_detail_order_{record_key}",
+                    help="可新增、更正或清空訂單編號。更改後會解除原業務訂單關聯；已完成紀錄的歷史施工計數不會自動轉移。",
+                ).strip()
                 parsed_record_date = pd.to_datetime(
                     edited_date.replace("/", "-"),
                     format="mixed",
@@ -7414,7 +7420,10 @@ def show_details_dialog(
                 else:
                     old_record = dict(row_data)
                     updated_record = dict(row_data)
+                    order_changed = edited_order != str(row_data.get("訂單", "")).strip()
                     updated_record.update({
+                        "訂單": edited_order,
+                        "業務紀錄ID": "" if order_changed else row_data.get("業務紀錄ID", ""),
                         "日期": edited_date,
                         "廠別": edited_plant,
                         "案件": edited_case,
@@ -7451,7 +7460,7 @@ def show_details_dialog(
                             )
 
                         sales_progress_message = ""
-                        if edited_status == "已完成":
+                        if edited_status == "已完成" and not (order_changed and normalized_status == "已完成"):
                             sales_progress_message = apply_completed_installation_to_sales(
                                 updated_record,
                                 saved_record_id,
@@ -8340,44 +8349,6 @@ if tab2 is not None:
                             + "、".join(identity_machine_names)
                         )
 
-                matched_order_entries = matching_sales_orders(
-                    identity_plant,
-                    identity_case,
-                )
-                selected_order_record = None
-                if matched_order_entries:
-                    order_choice = st.selectbox(
-                        "訂單（依廠別＋案件／工程名稱篩選）",
-                        [None, *range(len(matched_order_entries))],
-                        format_func=lambda choice: (
-                            "不綁定訂單"
-                            if choice is None
-                            else (
-                                f"{matched_order_entries[choice][1].get('訂單', '')}｜"
-                                f"{matched_order_entries[choice][1].get('品名', '')}｜"
-                                f"已施工 "
-                                f"{matched_order_entries[choice][1].get('已施工', 0)}/"
-                                f"{matched_order_entries[choice][1].get('數量', 0)}"
-                            )
-                        ),
-                        key=f"dev_identity_order_{dev_key}",
-                    )
-                    if order_choice is not None:
-                        selected_order_record = matched_order_entries[order_choice][1]
-                elif identity_plant and identity_case:
-                    st.caption("目前沒有符合此廠別與工程名稱的未達量訂單。")
-
-                manual_order_number = st.text_input(
-                    "訂單編號（選填）",
-                    value=(str(selected_order_record.get("訂單", "")).strip()
-                           if selected_order_record is not None else ""),
-                    disabled=selected_order_record is not None,
-                    placeholder="輸入訂單編號，例如：220-20261111001-0001",
-                    help="未綁定既有訂單時可手動輸入。完成裝機時，若廠別、案件與訂單編號符合既有訂單，會依原有規則更新已施工數量。",
-                    key=(f"dev_identity_manual_order_{dev_key}_"
-                         + (str(order_choice) if selected_order_record is not None else "manual")),
-                )
-
                 if st.button(
                     "檢查未完成紀錄並繼續",
                     type="primary",
@@ -8402,7 +8373,8 @@ if tab2 is not None:
                             "案件": identity_case,
                             "機台名稱": "、".join(identity_machine_names),
                             "機台名稱列表": identity_machine_names,
-                            **installation_order_fields(selected_order_record, manual_order_number),
+                            "訂單": "",
+                            "業務紀錄ID": "",
                             "自訂廠別": identity_plant_choice == "其他",
                             "自訂案件": (
                                 identity_case_choice == "其他"
@@ -8482,8 +8454,6 @@ if tab2 is not None:
                             "因此不自動帶入各機台的舊內容："
                             + "、".join(identity_data["批次已有未完成機台"])
                         )
-                    if identity_data.get("訂單"):
-                        st.caption(f"訂單編號：{identity_data['訂單']}")
                     if previous_prefill.get("資料來源"):
                         st.caption(f"已帶入來源：{previous_prefill['資料來源']}（唯讀參考）")
                 with identity_action_col:
@@ -8502,7 +8472,51 @@ if tab2 is not None:
                         st.session_state.dev_checklist_key += 1
                         st.rerun()
 
+                st.markdown("#### 訂單資料（選填）")
+                matched_order_entries = matching_sales_orders(
+                    identity_data["廠別"],
+                    loaded_case,
+                )
+                selected_order_record = None
+                if matched_order_entries:
+                    order_choice = st.selectbox(
+                        "訂單（依廠別＋案件／工程名稱篩選）",
+                        [None, *range(len(matched_order_entries))],
+                        format_func=lambda choice: (
+                            "不綁定訂單"
+                            if choice is None
+                            else (
+                                f"{matched_order_entries[choice][1].get('訂單', '')}｜"
+                                f"{matched_order_entries[choice][1].get('品名', '')}｜"
+                                f"已施工 "
+                                f"{matched_order_entries[choice][1].get('已施工', 0)}/"
+                                f"{matched_order_entries[choice][1].get('數量', 0)}"
+                            )
+                        ),
+                        key=f"dev_identity_order_{dev_key}",
+                    )
+                    if order_choice is not None:
+                        selected_order_record = matched_order_entries[order_choice][1]
+                else:
+                    st.caption("目前沒有符合此廠別與工程名稱的未達量訂單。")
+
+                manual_order_number = st.text_input(
+                    "訂單編號（選填）",
+                    value=(str(selected_order_record.get("訂單", "")).strip()
+                           if selected_order_record is not None else ""),
+                    disabled=selected_order_record is not None,
+                    placeholder="輸入訂單編號，例如：220-20261111001-0001",
+                    help="未綁定既有訂單時可手動輸入。完成裝機時，若廠別、案件與訂單編號符合既有訂單，會依原有規則更新已施工數量。",
+                    key=(f"dev_identity_manual_order_{dev_key}_"
+                         + (str(order_choice) if selected_order_record is not None else "manual")),
+                )
+
                 is_custom_case = bool(identity_data.get("自訂案件"))
+                current_order_fields = installation_order_fields(selected_order_record, manual_order_number)
+                if any(identity_data.get(key, "") != value for key, value in current_order_fields.items()):
+                    identity_data.update(current_order_fields)
+                    st.session_state.dev_add_preview = None
+                    st.session_state.dev_pending_preview = None
                 checklist_items = (
                     []
                     if is_custom_case
@@ -8613,8 +8627,7 @@ if tab2 is not None:
                         "廠別": identity_data["廠別"],
                         "案件": loaded_case,
                         "機台名稱": identity_data["機台名稱"],
-                        "訂單": identity_data.get("訂單", ""),
-                        "業務紀錄ID": identity_data.get("業務紀錄ID", ""),
+                        **installation_order_fields(selected_order_record, manual_order_number),
                         "項目確認": checklist_summary,
                         "安裝人員": "、".join(dev_installers) if dev_installers else "未指定",
                         "狀態": dev_status,
