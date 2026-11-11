@@ -5296,6 +5296,16 @@ def show_unrecorded_report_dialog(report_df):
             st.rerun()
 
 
+def installation_order_fields(selected_order_record, manual_order_number):
+    """保存手動訂單號碼；選取既有訂單時同時保留明確的業務關聯。"""
+    if selected_order_record is not None:
+        return {
+            "訂單": str(selected_order_record.get("訂單", "")).strip(),
+            "業務紀錄ID": str(selected_order_record.get("業務紀錄ID", "")).strip(),
+        }
+    return {"訂單": str(manual_order_number or "").strip(), "業務紀錄ID": ""}
+
+
 def unrecorded_item_display_category(item):
     """人力依品號獨立顯示，保留原始差異分類供後續統計使用。"""
     if str(item.get("品號", "")).strip().upper() == "PM-0001-00":
@@ -8357,6 +8367,17 @@ if tab2 is not None:
                 elif identity_plant and identity_case:
                     st.caption("目前沒有符合此廠別與工程名稱的未達量訂單。")
 
+                manual_order_number = st.text_input(
+                    "訂單編號（選填）",
+                    value=(str(selected_order_record.get("訂單", "")).strip()
+                           if selected_order_record is not None else ""),
+                    disabled=selected_order_record is not None,
+                    placeholder="輸入訂單編號，例如：220-20261111001-0001",
+                    help="未綁定既有訂單時可手動輸入。完成裝機時，若廠別、案件與訂單編號符合既有訂單，會依原有規則更新已施工數量。",
+                    key=(f"dev_identity_manual_order_{dev_key}_"
+                         + (str(order_choice) if selected_order_record is not None else "manual")),
+                )
+
                 if st.button(
                     "檢查未完成紀錄並繼續",
                     type="primary",
@@ -8381,16 +8402,7 @@ if tab2 is not None:
                             "案件": identity_case,
                             "機台名稱": "、".join(identity_machine_names),
                             "機台名稱列表": identity_machine_names,
-                            "訂單": (
-                                str(selected_order_record.get("訂單", "")).strip()
-                                if selected_order_record
-                                else ""
-                            ),
-                            "業務紀錄ID": (
-                                str(selected_order_record.get("業務紀錄ID", "")).strip()
-                                if selected_order_record
-                                else ""
-                            ),
+                            **installation_order_fields(selected_order_record, manual_order_number),
                             "自訂廠別": identity_plant_choice == "其他",
                             "自訂案件": (
                                 identity_case_choice == "其他"
@@ -8471,7 +8483,7 @@ if tab2 is not None:
                             + "、".join(identity_data["批次已有未完成機台"])
                         )
                     if identity_data.get("訂單"):
-                        st.caption(f"已綁定訂單：{identity_data['訂單']}")
+                        st.caption(f"訂單編號：{identity_data['訂單']}")
                     if previous_prefill.get("資料來源"):
                         st.caption(f"已帶入來源：{previous_prefill['資料來源']}（唯讀參考）")
                 with identity_action_col:
