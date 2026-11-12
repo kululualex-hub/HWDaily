@@ -4836,7 +4836,8 @@ def load_installation_excel_comparisons():
                     and report_inclusion.get("列入統計") is True
                     and record_status == "已記錄"):
                 comparison.setdefault("統計明細", {}).setdefault(target_key, []).append(dict(saved_record))
-                if target_key == "新增" and report_inclusion.get("訂單進度顯示") is True:
+                # 與匯出明細共用確認條件，既有已確認新增項目也應顯示。
+                if target_key == "新增":
                     comparison.setdefault("已確認新增訂單", []).append({
                         **{field: saved_record.get(field, "") for field in
                            ["日期", "訂單", "品名", "品號", "訂單數量", "未交數量", "已交數量"]},
@@ -4932,10 +4933,6 @@ def mark_installation_items_recorded(sheet_rows, inclusion_details=None):
         payload["_報告統計"] = {
             **(inclusion_details or {}), "列入統計": inclusion_details is not None,
             "處理時間": processed_time, "處理者": processor,
-            # 僅新確認的新增差異加入訂單進度，不回填既有歷史紀錄。
-            "訂單進度顯示": (
-                inclusion_details is not None and source.get("紀錄類型") == "新增項目"
-            ),
         }
         updates.append({"range": f"J{row_number}:M{row_number}", "values": [[
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
@@ -5891,35 +5888,143 @@ def find_product_project_mapping(product_name):
     )
 
 
+def progress_order_without_prefix(value):
+    """移除日期型主訂單號碼之前的英數種類代碼，不誤刪主單號。"""
+    text = re.sub(r"\s+", "", str(value or "")).upper()
+    return re.sub(r"^[A-Z0-9]+-(?=\d{8,}(?:-|$))", "", text)
+
+
+def normalize_progress_order(value):
+    """忽略訂單種類前綴及最後四碼項次，保留主訂單編號。"""
+    text = progress_order_without_prefix(value)
+    return re.sub(r"-\d{4}$", "", text)
+
+
+def build_comparison_order_progress(additions, installations):
+    """由已確認新增明細與裝機紀錄重算進度，不寫回或重複扣除數量。"""
+    def clean(value):
+        return str(value or "").strip().casefold()
+
+    def timestamp(value):
+        parsed = pd.to_datetime(value, errors="coerce")
+        return parsed.value if not pd.isna(parsed) else -1
+
+    orders = {}
+    for addition in sorted(additions, key=lambda r: timestamp(r.get("確認時間", ""))):
+        # 同一訂單品項在不同版本重複新增時只保留最後一次確認。
+        # 明細去重仍保留項次，不因放寬裝機比對而吞掉另一筆訂單明細。
+        detail_order = progress_order_without_prefix(addition.get("訂單"))
+        key = (detail_order, clean(addition.get("品號")))
+        orders[key] = {
+            k: v for k, v in addition.items()
+            if k not in {"未交數量", "已交數量"}
+        }
+    index = {}
+    for key in orders:
+        if key[0]:
+            index.setdefault(normalize_progress_order(key[0]), []).append(key)
+    counts = {key: 0 for key in orders}
+    latest = {}
+    for position, record in enumerate(installations):
+        machine = clean(record.get("機台名稱"))
+        identity = (normalize_progress_order(record.get("訂單")),
+                    clean(record.get("廠別")), clean(record.get("案件")), machine)
+        if not machine:
+            identity += (position,)
+        rank = (timestamp(record.get("日期", "")),
+                timestamp(record.get("更新時間") or record.get("建立時間", "")), position)
+        if identity not in latest or rank > latest[identity][0]:
+            latest[identity] = (rank, record)
+
+    unmatched = []
+    match_warnings = {}
+    for _, record in latest.values():
+        order = normalize_progress_order(record.get("訂單"))
+        candidates = index.get(order, [])
+        reason = ""
+        if not order:
+            continue
+        elif not candidates:
+            reason = "找不到已確認新增訂單"
+        elif len(candidates) > 1:
+            for key in candidates:
+                match_warnings.setdefault(key, set()).add("訂單編號對應多個品項，裝機暫不計數")
+            continue
+        elif not clean(record.get("機台名稱")):
+            match_warnings.setdefault(candidates[0], set()).add("裝機缺少機台名稱，暫不計數")
+            continue
+        if reason:
+            unmatched.append({
+                **{field: record.get(field, "") for field in
+                   ["日期", "訂單", "廠別", "案件", "機台名稱", "安裝人員", "狀態"]},
+                "原因": reason,
+            })
+        elif str(record.get("狀態", "")).strip() == "已完成":
+            counts[candidates[0]] += 1
+
+    active, completed = [], []
+    for key, row in orders.items():
+        raw_quantity = pd.to_numeric(row.get("訂單數量"), errors="coerce")
+        valid = pd.notna(raw_quantity) and raw_quantity > 0 and float(raw_quantity).is_integer()
+        quantity = int(raw_quantity) if valid else None
+        installed = counts[key]
+        row.update({"已安裝": installed, "待安裝": max(quantity - installed, 0) if valid else None})
+        if not valid:
+            row["提示"] = "訂單數量須為正整數，請確認來源資料"
+        elif installed > quantity:
+            row["提示"] = "已安裝超過訂單數量，請核對裝機紀錄"
+        if key in match_warnings:
+            row["提示"] = "；".join(filter(None, [row.get("提示", ""), *sorted(match_warnings[key])]))
+        # 超量仍歸完成並明確警示，避免待安裝變負數。
+        (completed if valid and installed >= quantity else active).append(row)
+    return {"進行中": active, "已完成": completed, "無資料": unmatched}
+
+
 def render_order_progress_area():
+    st.markdown("### 訂單進度區")
+    st.caption(
+        "依已確認列入統計的新增訂單比對裝機紀錄。訂單數量保留原值，"
+        "僅已完成的裝機計入已安裝；同訂單、廠區、工程與機台只計一次。"
+        "忽略主訂單號碼前的英數代碼（如 220-、22R-、230-、SO-）、"
+        "空白及最後四碼項次（例如 -0001）。"
+    )
+    try:
+        additions = [row for comparison in load_installation_excel_comparisons()
+                     for row in comparison.get("已確認新增訂單", [])]
+        new_records = load_new_installation_records()
+        converted_keys = {r.get("來源鍵") for r in new_records if r.get("來源鍵")}
+        legacy_records = [r for r in legacy_records_for_new_interface()
+                          if r.get("來源鍵") not in converted_keys]
+        groups = build_comparison_order_progress(additions, [*legacy_records, *new_records])
+        names = ["進行中", "已完成", "無資料"]
+        for name, tab in zip(names, st.tabs(names)):
+            with tab:
+                rows = groups[name]
+                if name == "無資料":
+                    st.caption("僅列出已填訂單編號、但找不到已確認新增訂單的裝機紀錄。")
+                if not rows:
+                    st.info(f"目前沒有{name}項目。")
+                    continue
+                frame = pd.DataFrame(rows)
+                if name != "無資料":
+                    columns = ["日期", "訂單", "區域", "廠區", "工程名稱", "品名", "品號",
+                               "訂單數量", "待安裝", "已安裝", "提示", "確認時間", "確認人", "來源檔案"]
+                    frame = frame[[c for c in columns if c in frame.columns]]
+                st.dataframe(frame, hide_index=True, use_container_width=True)
+                st.caption(f"共 {len(rows)} 筆。")
+    except Exception as error:
+        st.error(f"訂單裝機進度讀取失敗：{error}")
+    with st.expander("原有業務訂單進度與管理"):
+        render_legacy_order_progress_area()
+
+
+def render_legacy_order_progress_area():
     """顯示已完成裝機確認的業務項目。"""
     st.markdown("### 訂單進度區")
     st.caption(
         "裝機確認區完成工程名稱配對後，項目會自動出現在此處；"
         "已施工達到數量時，狀態會變為「可驗收」。"
     )
-    st.markdown("#### 客戶明細已確認新增項目")
-    st.caption(
-        "僅顯示本功能啟用後確認列入統計的新增項目；刪除及數量變更不顯示。"
-        "此處為比較明細展示，不會重複建立業務訂單或加總統計。"
-    )
-    try:
-        confirmed_additions = [
-            row for comparison in load_installation_excel_comparisons()
-            for row in comparison.get("已確認新增訂單", [])
-        ]
-        if confirmed_additions:
-            confirmed_df = pd.DataFrame(confirmed_additions)
-            confirmed_df = confirmed_df.sort_values(
-                "確認時間", ascending=False, kind="stable"
-            )
-            st.dataframe(confirmed_df, hide_index=True, use_container_width=True)
-            st.info(f"目前共有 {len(confirmed_df)} 筆已確認新增項目。")
-        else:
-            st.info("目前沒有已確認的客戶明細新增項目。")
-    except Exception as error:
-        st.error(f"客戶明細新增項目讀取失敗：{error}")
-
     progress_record_entries = sorted(
         [
             (record_index, record)
