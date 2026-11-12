@@ -4836,6 +4836,17 @@ def load_installation_excel_comparisons():
                     and report_inclusion.get("列入統計") is True
                     and record_status == "已記錄"):
                 comparison.setdefault("統計明細", {}).setdefault(target_key, []).append(dict(saved_record))
+                if target_key == "新增" and report_inclusion.get("訂單進度顯示") is True:
+                    comparison.setdefault("已確認新增訂單", []).append({
+                        **{field: saved_record.get(field, "") for field in
+                           ["日期", "訂單", "品名", "品號", "訂單數量", "未交數量", "已交數量"]},
+                        "區域": report_inclusion.get("區域", ""),
+                        "廠區": report_inclusion.get("廠區", ""),
+                        "工程名稱": report_inclusion.get("工程名稱", ""),
+                        "確認時間": report_inclusion.get("處理時間", ""),
+                        "確認人": report_inclusion.get("處理者", ""),
+                        "來源檔案": comparison["新版本檔名"],
+                    })
     return sorted(
         comparisons.values(),
         key=lambda comparison: (comparison["比較時間"], comparison["比較ID"]),
@@ -4921,6 +4932,10 @@ def mark_installation_items_recorded(sheet_rows, inclusion_details=None):
         payload["_報告統計"] = {
             **(inclusion_details or {}), "列入統計": inclusion_details is not None,
             "處理時間": processed_time, "處理者": processor,
+            # 僅新確認的新增差異加入訂單進度，不回填既有歷史紀錄。
+            "訂單進度顯示": (
+                inclusion_details is not None and source.get("紀錄類型") == "新增項目"
+            ),
         }
         updates.append({"range": f"J{row_number}:M{row_number}", "values": [[
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
@@ -5883,6 +5898,28 @@ def render_order_progress_area():
         "裝機確認區完成工程名稱配對後，項目會自動出現在此處；"
         "已施工達到數量時，狀態會變為「可驗收」。"
     )
+    st.markdown("#### 客戶明細已確認新增項目")
+    st.caption(
+        "僅顯示本功能啟用後確認列入統計的新增項目；刪除及數量變更不顯示。"
+        "此處為比較明細展示，不會重複建立業務訂單或加總統計。"
+    )
+    try:
+        confirmed_additions = [
+            row for comparison in load_installation_excel_comparisons()
+            for row in comparison.get("已確認新增訂單", [])
+        ]
+        if confirmed_additions:
+            confirmed_df = pd.DataFrame(confirmed_additions)
+            confirmed_df = confirmed_df.sort_values(
+                "確認時間", ascending=False, kind="stable"
+            )
+            st.dataframe(confirmed_df, hide_index=True, use_container_width=True)
+            st.info(f"目前共有 {len(confirmed_df)} 筆已確認新增項目。")
+        else:
+            st.info("目前沒有已確認的客戶明細新增項目。")
+    except Exception as error:
+        st.error(f"客戶明細新增項目讀取失敗：{error}")
+
     progress_record_entries = sorted(
         [
             (record_index, record)
