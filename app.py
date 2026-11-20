@@ -4860,7 +4860,9 @@ def load_unrecorded_installation_items():
     comparison_worksheet = get_installation_comparison_worksheet()
     unrecorded_items = []
     supported_record_types = {"新增項目", "刪除項目", "數量變更"}
-    for sheet_row, row in enumerate(comparison_worksheet.get_all_records(), start=2):
+    comparison_rows = comparison_worksheet.get_all_records()
+    mappings = build_plant_part_project_mappings(comparison_rows)
+    for sheet_row, row in enumerate(comparison_rows, start=2):
         record_type = str(row.get("紀錄類型", "")).strip()
         if record_type not in supported_record_types:
             continue
@@ -4898,6 +4900,9 @@ def load_unrecorded_installation_items():
             if record_type == "刪除項目"
             else str(row.get("新版本檔名", "")).strip()
         )
+        mapped = mappings.get(plant_part_mapping_key(
+            display_record.get("客戶簡稱", ""), display_record.get("品號", "")
+        ), {})
         unrecorded_items.append({
             "工作表列": sheet_row,
             "比較ID": str(row.get("比較ID", "")).strip(),
@@ -4906,6 +4911,9 @@ def load_unrecorded_installation_items():
             "來源檔案": source_filename,
             "新版本檔名": str(row.get("新版本檔名", "")).strip(),
             **display_record,
+            "配對廠區": normalize_report_plant_name(display_record.get("客戶簡稱", "")),
+            "配對工程": mapped.get("工程名稱", ""),
+            "工程配對狀態": "已配對" if mapped else "待配對",
             "數量變更內容": quantity_change_text,
             "紀錄狀態": "未紀錄",
             "_原始差異資料": saved_record,
@@ -4934,6 +4942,15 @@ def mark_installation_items_recorded(sheet_rows, inclusion_details=None):
             **(inclusion_details or {}), "列入統計": inclusion_details is not None,
             "處理時間": processed_time, "處理者": processor,
         }
+        if inclusion_details is not None:
+            plant = str(inclusion_details.get("廠區", "")).strip()
+            part = str(payload.get("品號", "")).strip()
+            project = str(inclusion_details.get("工程名稱", "")).strip()
+            if plant and part and project:
+                payload["_品號工程對照"] = {
+                    "廠區": plant, "品號": part, "工程名稱": project,
+                    "更新時間": processed_time, "確認人": processor,
+                }
         updates.append({"range": f"J{row_number}:M{row_number}", "values": [[
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             "已記錄", processed_time, processor,
@@ -4996,6 +5013,46 @@ def normalize_report_plant_name(raw_plant_name):
     if re.fullmatch(r"\d+[A-Z][A-Z0-9]*", suffix):
         return f"T{suffix}"
     return suffix
+
+
+def plant_part_mapping_key(plant, part):
+    return (normalize_report_plant_name(plant).strip().casefold(),
+            str(part or "").strip().casefold())
+
+
+def build_plant_part_project_mappings(records):
+    """從明確保存的確認對照建立索引；同廠區品號採最後一次確認。"""
+    mappings = {}
+    ranks = {}
+    for position, record in enumerate(records):
+        if record.get("處理狀態") != "已記錄":
+            continue
+        try:
+            payload = json.loads(record.get("資料JSON") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        mapping = payload.get("_品號工程對照")
+        inclusion = payload.get("_報告統計")
+        if (not isinstance(mapping, dict) or not isinstance(inclusion, dict)
+                or inclusion.get("列入統計") is not True):
+            continue
+        key = plant_part_mapping_key(mapping.get("廠區"), mapping.get("品號"))
+        if not all(key) or not str(mapping.get("工程名稱", "")).strip():
+            continue
+        parsed = pd.to_datetime(mapping.get("更新時間", ""), errors="coerce")
+        rank = (parsed.value if not pd.isna(parsed) else -1, position)
+        if key not in ranks or rank > ranks[key]:
+            mappings[key] = dict(mapping)
+            ranks[key] = rank
+    return mappings
+
+
+def load_plant_part_project_mappings():
+    return build_plant_part_project_mappings(
+        get_installation_comparison_worksheet().get_all_records()
+    )
 
 
 def calculate_unrecorded_report_counts(item, existing_record=None):
@@ -5182,11 +5239,20 @@ def show_unrecorded_report_dialog(report_df):
         },
         key=str.casefold,
     )
+    part_project_mapping = load_plant_part_project_mappings().get(
+        plant_part_mapping_key(selected_plant_text, item.get("品號", "")), {}
+    )
+    mapped_project = part_project_mapping.get("工程名稱", "")
+    if mapped_project and mapped_project not in project_options:
+        project_options.append(mapped_project)
+    if mapped_project:
+        st.info(f"依廠區＋品號自動帶入工程：{mapped_project}；確認前仍可修改。")
     with select_col3:
         selected_project = st.selectbox(
             "工程名稱 *",
             project_options,
-            index=0 if len(project_options) == 1 else None,
+            index=(project_options.index(mapped_project) if mapped_project
+                   else (0 if len(project_options) == 1 else None)),
             placeholder="選擇既有工程或輸入新工程名稱",
             accept_new_options=True,
             key=f"unrecorded_project_{sheet_row}_{dialog_key}_{selected_area}_{selected_plant_text}",
@@ -5377,6 +5443,21 @@ def render_unrecorded_installation_items_panel(report_df):
         for item in unrecorded_items
         if unrecorded_item_display_category(item) == active_category
     ]
+    project_groups = sorted({
+        (item.get("配對廠區", ""), item.get("配對工程", ""))
+        for item in category_items if item.get("配對工程")
+    })
+    group_choice = st.selectbox(
+        "工程分項（廠區＋工程名稱）",
+        ["全部", "待配對", *project_groups],
+        format_func=lambda value: f"{value[0]}／{value[1]}" if isinstance(value, tuple) else value,
+        key=f"unrecorded_project_group_{active_category}",
+    )
+    if group_choice == "待配對":
+        category_items = [item for item in category_items if not item.get("配對工程")]
+    elif isinstance(group_choice, tuple):
+        category_items = [item for item in category_items
+                          if (item.get("配對廠區", ""), item.get("配對工程", "")) == group_choice]
     selected_rows = []
     if not category_items:
         st.info(f"目前沒有未紀錄的{active_category}。")
@@ -5394,6 +5475,9 @@ def render_unrecorded_installation_items_panel(report_df):
                 "業務員名稱": item["業務員名稱"],
                 "品號": item["品號"],
                 "品名": item["品名"],
+                "配對廠區": item.get("配對廠區", ""),
+                "配對工程": item.get("配對工程", ""),
+                "工程配對狀態": item.get("工程配對狀態", "待配對"),
                 "訂單數量": item["訂單數量"],
                 "未交數量": item["未交數量"],
                 "已交數量": item["已交數量"],
@@ -6132,6 +6216,20 @@ def render_legacy_order_progress_area():
 def render_installation_confirmation_area(can_download):
     """顯示業務待確認項目、已交接附件與新版輸入的其他案件。"""
     st.markdown("### 裝機確認區")
+    with st.expander("廠區＋品號與工程對照", expanded=False):
+        st.caption(
+            "處理未紀錄項目並確認列入統計時保存；同廠區、品號以最後確認的工程為準。"
+            "對照附於原比較確認紀錄，撤回該比較紀錄時也會移除其對照。"
+        )
+        try:
+            mappings = load_plant_part_project_mappings()
+            if mappings:
+                st.dataframe(pd.DataFrame([mappings[key] for key in sorted(mappings)]),
+                             hide_index=True, use_container_width=True)
+            else:
+                st.info("尚無品號工程對照；確認列入統計後會自動建立。")
+        except Exception as error:
+            st.error(f"品號工程對照讀取失敗：{error}")
     st.caption(
         "此區可替業務項目設定工程名稱，也顯示背鍋俠已確認的開發附件，"
         "以及新版裝機輸入的其他案件。"
