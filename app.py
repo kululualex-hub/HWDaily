@@ -4999,7 +4999,13 @@ def normalize_report_plant_name(raw_plant_name):
     # 正確的 T15B 被視為兩個不同廠區。其他非 TSMC 名稱仍保留原樣。
     if compact_name.upper() == "15B":
         return "T15B"
+    # 保留原有連字號轉換；新增無連字號的數字廠區及 JP 格式，
+    # 支援 TSMC 12P7、TSMC12P7，且不誤轉 TSMX 等其他名稱。
     prefix_match = re.match(r"^TSMC-(.+)$", compact_name, flags=re.IGNORECASE)
+    if not prefix_match:
+        prefix_match = re.fullmatch(
+            r"TSMC(JP|\d+(?:[A-Z][A-Z0-9]*)?)", compact_name, flags=re.IGNORECASE
+        )
     if not prefix_match:
         # Only TSMC-prefixed values require conversion. Preserve spaces in
         # names such as "UMC 8C" so they continue matching report data.
