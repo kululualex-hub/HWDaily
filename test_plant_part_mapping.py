@@ -42,6 +42,11 @@ other_payload = json.loads(payload)
 other_payload['_品號工程對照'].update({'廠區': 'T15B', '工程名稱': '心電圖'})
 other = {**saved, '資料JSON': json.dumps(other_payload)}
 assert len(build([saved, other])) == 2
+# Earlier included records with plant/part/project can seed the new queue too.
+legacy_payload = json.loads(payload)
+legacy_payload.pop('_品號工程對照')
+legacy = {**saved, '資料JSON': json.dumps(legacy_payload)}
+assert build([legacy])[key('T14A', 'P1')]['工程名稱'] == '光學尺'
 changed_payload = json.loads(payload)
 changed_payload['_品號工程對照'].update({'工程名稱': '新工程', '更新時間': '2099-01-01 00:00:00'})
 changed = {**saved, '資料JSON': json.dumps(changed_payload)}

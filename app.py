@@ -918,6 +918,7 @@ def append_report_entry(
     installed_count,
     existing_record=None,
     action="新增",
+    comparison_update=None,
 ):
     """新增報告快照，並在 Google Sheets 寫入衍生欄位公式。"""
     report_worksheet = get_report_entry_worksheet()
@@ -949,11 +950,24 @@ def append_report_entry(
             f'=IF(G{next_row}=0,"待料",I{next_row}/G{next_row})'
         )
 
-    report_worksheet.append_row(
-        [row_values.get(header, "") for header in REPORT_ENTRY_HEADERS],
-        value_input_option="USER_ENTERED",
-        table_range=f"A:{chr(ord('A') + len(REPORT_ENTRY_HEADERS) - 1)}",
-    )
+    values = [row_values.get(header, "") for header in REPORT_ENTRY_HEADERS]
+    if comparison_update is None:
+        report_worksheet.append_row(
+            values, value_input_option="USER_ENTERED",
+            table_range=f"A:{chr(ord('A') + len(REPORT_ENTRY_HEADERS) - 1)}",
+        )
+    else:
+        # 報告快照與差異確認狀態同批提交，避免只成功一半而重試加算。
+        cells = [{"userEnteredValue": (
+            {"formulaValue": value} if isinstance(value, str) and value.startswith("=")
+            else {"numberValue": value} if isinstance(value, (int, float))
+            else {"stringValue": str(value)}
+        )} for value in values]
+        report_worksheet.spreadsheet.batch_update({"requests": [
+            {"appendCells": {"sheetId": report_worksheet.id,
+                             "rows": [{"values": cells}], "fields": "userEnteredValue"}},
+            comparison_update,
+        ]})
     load_report_entry_records.clear()
     try:
         ws_log.append_row(
@@ -5041,6 +5055,11 @@ def build_plant_part_project_mappings(records):
             continue
         mapping = payload.get("_品號工程對照")
         inclusion = payload.get("_報告統計")
+        if not isinstance(mapping, dict) and isinstance(inclusion, dict):
+            mapping = {"廠區": inclusion.get("廠區", ""), "品號": payload.get("品號", ""),
+                       "工程名稱": inclusion.get("工程名稱", ""),
+                       "更新時間": inclusion.get("處理時間", record.get("處理時間", "")),
+                       "確認人": inclusion.get("處理者", "")}
         if (not isinstance(mapping, dict) or not isinstance(inclusion, dict)
                 or inclusion.get("列入統計") is not True):
             continue
@@ -5099,6 +5118,67 @@ def calculate_unrecorded_report_counts(item, existing_record=None):
         "建議已安裝": current_installed,
         "計算說明": calculation_note,
     }
+
+
+def confirm_pending_comparison(item, area, plant, project, order, shipped, installed, existing_record):
+    """確認前重讀狀態與報告基準，並將報告與已記錄標記一起寫入。"""
+    if st.session_state.get("user_role") != "管理者":
+        raise PermissionError("僅管理者可確認更新報告統計。")
+    comparison_sheet = get_installation_comparison_worksheet()
+    rows = comparison_sheet.get_all_records()
+    row_number = int(item["工作表列"])
+    if row_number < 2 or row_number - 2 >= len(rows):
+        raise ValueError("比較紀錄已變更，請重新整理。")
+    row = rows[row_number - 2]
+    if (str(row.get("比較ID", "")) != str(item.get("比較ID", ""))
+            or row.get("紀錄類型") != item.get("差異分類")
+            or row.get("處理狀態") != "未紀錄"):
+        raise ValueError("這筆差異已處理或已變更，未再次加算；請重新整理。")
+    payload = json.loads(row.get("資料JSON") or "{}")
+    if payload != item.get("_原始差異資料"):
+        raise ValueError("比較內容已變更，請重新選取並確認。")
+    load_report_entry_records.clear()
+    current = load_report_entry_records()
+    if current.empty:
+        current = pd.DataFrame(columns=["區域", "廠區", "工程名稱", "年度"])
+    matches = current[
+        current["區域"].astype(str).str.strip().eq(area)
+        & current["廠區"].map(normalize_report_plant_name).str.casefold().eq(normalize_report_plant_name(plant).casefold())
+        & current["工程名稱"].astype(str).str.strip().eq(project)
+    ]
+    if existing_record and "年度" in matches.columns:
+        matches = matches[pd.to_numeric(matches["年度"], errors="coerce").eq(
+            pd.to_numeric(existing_record.get("年度"), errors="coerce"))]
+    latest = matches.iloc[-1].to_dict() if not matches.empty else None
+    def fingerprint(record):
+        return None if record is None else (
+            str(record.get("建立時間", "")),
+            *[report_integer(record.get(k)) for k in ["訂單數量", "已出貨", "已安裝"]],
+        )
+    if fingerprint(latest) != fingerprint(existing_record):
+        raise ValueError("工程統計已更新，請重新開啟確認畫面，以最新數量計算。")
+    if not plant or not project or min(order, shipped, installed) < 0 or installed > shipped or shipped > order:
+        raise ValueError("請確認廠區、工程與數量（已安裝 ≤ 已出貨 ≤ 訂單）。")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    operator = f"{st.session_state.user_name} ({st.session_state.user_role})"
+    payload["_報告統計"] = {"區域": area, "廠區": plant, "工程名稱": project,
+                         "列入統計": True, "處理時間": now, "處理者": operator}
+    if str(payload.get("品號", "")).strip():
+        payload["_品號工程對照"] = {"廠區": plant, "品號": payload["品號"],
+                             "工程名稱": project, "更新時間": now, "確認人": operator}
+    update = {"updateCells": {
+        "range": {"sheetId": comparison_sheet.id, "startRowIndex": row_number - 1,
+                  "endRowIndex": row_number, "startColumnIndex": 9, "endColumnIndex": 13},
+        "rows": [{"values": [{"userEnteredValue": {"stringValue": value}} for value in
+                  [json.dumps(payload, ensure_ascii=False), "已記錄", now, operator]]}],
+        "fields": "userEnteredValue",
+    }}
+    append_report_entry(area, plant, project, order, shipped, installed,
+                        existing_record=latest, action=f"差異統計（{item['差異分類']}）",
+                        comparison_update=update)
+    load_unrecorded_installation_items.clear()
+    load_installation_excel_comparisons.clear()
+    st.session_state.installation_excel_last_result = None
 
 
 def dismiss_unrecorded_report_dialog():
@@ -5344,7 +5424,8 @@ def show_unrecorded_report_dialog(report_df):
             else:
                 try:
                     with st.spinner("正在更新報告並將差異改為已記錄..."):
-                        append_report_entry(
+                        confirm_pending_comparison(
+                            item,
                             selected_area,
                             selected_plant_text,
                             selected_project_text,
@@ -5352,12 +5433,7 @@ def show_unrecorded_report_dialog(report_df):
                             confirmed_shipped,
                             confirmed_installed,
                             existing_record=existing_record,
-                            action=f"差異統計（{item.get('差異分類', '')}）",
                         )
-                        mark_installation_items_recorded([sheet_row], inclusion_details={
-                            "區域": selected_area, "廠區": selected_plant_text,
-                            "工程名稱": selected_project_text,
-                        })
                     st.session_state.installation_unrecorded_pending = None
                     st.session_state.installation_unrecorded_flash = (
                         f"已更新報告：{selected_area}／{selected_plant_text}／"
@@ -5406,9 +5482,9 @@ def unrecorded_item_display_category(item):
     return str(item.get("差異分類", ""))
 
 
-def render_unrecorded_installation_items_panel(report_df):
+def render_unrecorded_installation_items_panel(report_df, scope="report"):
     """顯示未紀錄項目，勾選後依使用者確認決定是否更新報告統計。"""
-    st.markdown("#### 📋 未紀錄項目")
+    st.markdown("#### 客戶訂單差異待確認" if scope == "confirmation" else "#### 📋 未紀錄項目")
     if st.session_state.installation_unrecorded_flash:
         st.success(st.session_state.installation_unrecorded_flash)
         st.session_state.installation_unrecorded_flash = ""
@@ -5439,7 +5515,7 @@ def render_unrecorded_installation_items_panel(report_df):
         category_order,
         default=category_order[0],
         format_func=lambda category: f"{category}（{category_counts[category]}）",
-        key="installation_unrecorded_active_category",
+        key=f"installation_unrecorded_active_category_{scope}",
         width="stretch",
     )
     if active_category not in category_order:
@@ -5457,7 +5533,7 @@ def render_unrecorded_installation_items_panel(report_df):
         "工程分項（廠區＋工程名稱）",
         ["全部", "待配對", *project_groups],
         format_func=lambda value: f"{value[0]}／{value[1]}" if isinstance(value, tuple) else value,
-        key=f"unrecorded_project_group_{active_category}",
+        key=f"unrecorded_project_group_{scope}_{active_category}",
     )
     if group_choice == "待配對":
         category_items = [item for item in category_items if not item.get("配對工程")]
@@ -5470,6 +5546,7 @@ def render_unrecorded_installation_items_panel(report_df):
     else:
         editor_rows = []
         for item in category_items:
+            deltas = calculate_unrecorded_report_counts(item)
             editor_rows.append({
                 "勾選": False,
                 "工作表列": item["工作表列"],
@@ -5484,6 +5561,8 @@ def render_unrecorded_installation_items_panel(report_df):
                 "配對廠區": item.get("配對廠區", ""),
                 "配對工程": item.get("配對工程", ""),
                 "工程配對狀態": item.get("工程配對狀態", "待配對"),
+                "訂單增加量": deltas["訂單變化"],
+                "已出貨增加量": deltas["已出貨變化"],
                 "訂單數量": item["訂單數量"],
                 "未交數量": item["未交數量"],
                 "已交數量": item["已交數量"],
@@ -5501,7 +5580,7 @@ def render_unrecorded_installation_items_panel(report_df):
                 "工作表列": None,
             },
             key=(
-                f"installation_unrecorded_editor_{active_category}_"
+                f"installation_unrecorded_editor_{scope}_{active_category}_"
                 f"{st.session_state.installation_unrecorded_grid_key}"
             ),
         )
@@ -5515,7 +5594,7 @@ def render_unrecorded_installation_items_panel(report_df):
         type="primary",
         use_container_width=True,
         disabled=len(selected_rows) != 1,
-        key=f"installation_unrecorded_save_{st.session_state.installation_unrecorded_grid_key}",
+        key=f"installation_unrecorded_save_{scope}_{st.session_state.installation_unrecorded_grid_key}",
     ):
         selected_row = int(selected_rows[0])
         selected_item = next(
@@ -5524,10 +5603,12 @@ def render_unrecorded_installation_items_panel(report_df):
         st.session_state.installation_unrecorded_pending = {
             "步驟": "詢問",
             "項目": selected_item,
+            "來源": scope,
         }
         st.rerun()
 
-    if st.session_state.installation_unrecorded_pending:
+    if (st.session_state.installation_unrecorded_pending
+            and st.session_state.installation_unrecorded_pending.get("來源", "report") == scope):
         show_unrecorded_report_dialog(report_df)
 
 
@@ -6222,6 +6303,20 @@ def render_legacy_order_progress_area():
 def render_installation_confirmation_area(can_download):
     """顯示業務待確認項目、已交接附件與新版輸入的其他案件。"""
     st.markdown("### 裝機確認區")
+    st.caption("客戶訂單比對差異會依廠區、品號與既有工程對照分類；確認前不更新統計。")
+    try:
+        pending_report_df = load_report_entry_records()
+        if pending_report_df.empty:
+            pending_report_df = pd.DataFrame(columns=["年度", "區域", "廠區", "工程名稱"])
+        pending_report_df = pending_report_df.drop_duplicates(
+            subset=["年度", "區域", "廠區", "工程名稱"], keep="last"
+        ).reset_index(drop=True)
+        if st.session_state.get("user_role") == "管理者":
+            render_unrecorded_installation_items_panel(pending_report_df, scope="confirmation")
+        else:
+            st.info("客戶訂單差異的統計確認由管理者處理。")
+    except Exception as error:
+        st.error(f"客戶訂單差異待確認清單讀取失敗：{error}")
     with st.expander("廠區＋品號與工程對照", expanded=False):
         st.caption(
             "處理未紀錄項目並確認列入統計時保存；同廠區、品號以最後確認的工程為準。"
