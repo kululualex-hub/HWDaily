@@ -8,6 +8,8 @@ import calendar
 import io
 import json
 import hashlib
+import hmac
+import secrets
 import re
 import requests
 import uuid
@@ -2873,6 +2875,153 @@ def ensure_account_columns():
         if header not in headers:
             ws_accounts.update_cell(1, len(headers) + 1, header)
             headers.append(header)
+
+
+def account_password_hash(password):
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 600000).hex()
+    return f"pbkdf2_sha256$600000${salt}${digest}"
+
+
+def account_password_matches(password, stored):
+    if not stored:
+        return False
+    if not stored.startswith("pbkdf2_sha256$"):
+        return hmac.compare_digest(password.encode(), stored.encode())
+    try:
+        _, rounds, salt, expected = stored.split("$")
+        if int(rounds) != 600000:
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), int(rounds)).hex()
+        return hmac.compare_digest(digest, expected)
+    except (ValueError, TypeError):
+        return False
+
+
+def read_managed_accounts():
+    values = ws_accounts.get_all_values()
+    if not values or not all(h in values[0] for h in ["帳號", "密碼", "姓名", "權限"]):
+        raise ValueError("帳號管理缺少帳號、密碼、姓名或權限欄位。")
+    headers = values[0]
+    accounts = []
+    for number, values_row in enumerate(values[1:], 2):
+        row = dict(zip(headers, values_row))
+        if str(row.get("帳號", "")).strip():
+            row["_row"] = number
+            accounts.append(row)
+    return headers, accounts
+
+
+def save_managed_account(action, account_id, name="", role="", password=""):
+    headers, accounts = read_managed_accounts()
+    actor_id = st.session_state.get("user_id", "")
+    actor = [a for a in accounts if a["帳號"] == actor_id]
+    if (st.session_state.get("user_role") != "管理者" or len(actor) != 1
+            or actor[0].get("權限") != "管理者"):
+        raise PermissionError("僅有效的管理者帳號可管理帳號。")
+    account_id = account_id.strip()
+    if not account_id or account_id.casefold() == "guest":
+        raise ValueError("請輸入有效帳號，guest 為保留名稱。")
+    matches = [a for a in accounts if a["帳號"].strip().casefold() == account_id.casefold()]
+    if action not in {"新增", "修改", "刪除"}:
+        raise ValueError("不支援的操作。")
+    if action == "新增" and matches:
+        raise ValueError("帳號已存在（不分英文大小寫）。")
+    if action != "新增" and len(matches) != 1:
+        raise ValueError("帳號不存在或重複，請重新整理後確認。")
+    target = matches[0] if matches else {}
+    if action != "刪除":
+        if not name.strip() or role not in ROLE_PERMISSION_DEFAULTS:
+            raise ValueError("請填寫姓名並選擇有效權限。")
+        if (action == "新增" or password) and len(password) < 8:
+            raise ValueError("新密碼至少需要 8 個字元。")
+    removing_admin = target.get("權限") == "管理者" and (action == "刪除" or role != "管理者")
+    if removing_admin and sum(a.get("權限") == "管理者" for a in accounts) <= 1:
+        raise ValueError("不能刪除或降級最後一個管理者。")
+    if target.get("帳號") == actor_id and (action == "刪除" or removing_admin):
+        raise ValueError("不能刪除或降低目前登入帳號的權限，請使用另一個管理者操作。")
+    if action == "刪除":
+        ws_accounts.batch_clear([f"A{target['_row']}:{gspread.utils.rowcol_to_a1(target['_row'], len(headers))}"])
+    else:
+        updates = {"帳號": account_id if action == "新增" else target["帳號"],
+                   "姓名": name.strip(), "權限": role}
+        if password or action == "新增":
+            updates["密碼"] = account_password_hash(password)
+        if action == "新增":
+            ws_accounts.append_row([updates.get(h, "") for h in headers], value_input_option="RAW")
+        else:
+            ws_accounts.batch_update([
+                {"range": gspread.utils.rowcol_to_a1(target["_row"], headers.index(h) + 1),
+                 "values": [[value]]} for h, value in updates.items()
+            ], value_input_option="RAW")
+    try:
+        ws_log.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), actor_id,
+                           f"{action}帳號：{account_id}", target.get("權限", ""),
+                           "" if action == "刪除" else role], value_input_option="RAW")
+    except Exception:
+        pass
+
+
+def render_account_management():
+    st.markdown("### 帳號管理")
+    if st.session_state.get("user_role") != "管理者":
+        st.error("僅管理者可使用帳號管理。")
+        return
+    st.caption("設定角色後由系統套用既有權限；不顯示原密碼。刪除帳號不會刪除歷史裝機紀錄。")
+    try:
+        _, accounts = read_managed_accounts()
+    except Exception:
+        st.error("帳號資料讀取失敗，請稍後重試。")
+        return
+    if st.session_state.get("account_admin_flash"):
+        st.success(st.session_state.pop("account_admin_flash"))
+    st.dataframe(pd.DataFrame([{h: a.get(h, "") for h in ["帳號", "姓名", "權限"]}
+                              for a in accounts]), hide_index=True, use_container_width=True)
+    revision = st.session_state.get("account_admin_revision", 0)
+    roles = list(ROLE_PERMISSION_DEFAULTS)
+    def submit(action, account_id, name="", role="", password=""):
+        try:
+            save_managed_account(action, account_id, name, role, password)
+        except (ValueError, PermissionError) as error:
+            st.error(str(error))
+            return
+        except Exception:
+            st.error("操作未能確認成功，請重新整理核對後再試，避免重複新增。")
+            return
+        st.session_state.account_admin_flash = f"已{action}帳號：{account_id}"
+        st.session_state.account_admin_revision = revision + 1
+        st.rerun()
+    with st.expander("新增帳號"):
+        with st.form(f"account_add_{revision}"):
+            account_id = st.text_input("帳號", key=f"account_new_id_{revision}")
+            name = st.text_input("姓名", key=f"account_new_name_{revision}")
+            role = st.selectbox("權限", roles, index=roles.index("工程師"), key=f"account_new_role_{revision}")
+            password = st.text_input("密碼（至少 8 字元）", type="password", key=f"account_new_password_{revision}")
+            repeated = st.text_input("再次輸入密碼", type="password", key=f"account_new_repeat_{revision}")
+            if st.form_submit_button("新增帳號"):
+                if password != repeated:
+                    st.error("兩次密碼不一致。")
+                else:
+                    submit("新增", account_id, name, role, password)
+    if not accounts:
+        return
+    selected_id = st.selectbox("選擇要管理的帳號", [a["帳號"] for a in accounts], key="account_manage_select")
+    selected = next(a for a in accounts if a["帳號"] == selected_id)
+    with st.form(f"account_edit_{selected_id}_{revision}"):
+        name = st.text_input("姓名", value=selected.get("姓名", ""))
+        current_role = selected.get("權限", "")
+        role = st.selectbox("權限", roles, index=roles.index(current_role) if current_role in roles else None)
+        password = st.text_input("重設密碼（留空不變）", type="password")
+        repeated = st.text_input("再次輸入新密碼", type="password")
+        if st.form_submit_button("儲存帳號設定"):
+            if password != repeated:
+                st.error("兩次密碼不一致。")
+            else:
+                submit("修改", selected_id, name, role, password)
+    with st.expander("刪除帳號"):
+        confirm = st.text_input("輸入完整帳號以確認刪除", key=f"account_delete_confirm_{selected_id}_{revision}")
+        if st.button("確認刪除帳號", disabled=confirm != selected_id, key=f"account_delete_{selected_id}_{revision}"):
+            submit("刪除", selected_id)
 
 
 def get_apps_script_upload_config():
@@ -6699,18 +6848,20 @@ if not st.session_state.logged_in:
                     st.warning("請輸入帳號與密碼。")
                 else:
                     ensure_account_columns()
-                    accounts_data = ws_accounts.get_all_records()
+                    _, accounts_data = read_managed_accounts()
                     df_acc = pd.DataFrame(accounts_data)
                     
                     if not df_acc.empty and '帳號' in df_acc.columns and '密碼' in df_acc.columns:
                         df_acc['帳號'] = df_acc['帳號'].astype(str)
                         df_acc['密碼'] = df_acc['密碼'].astype(str)
                         
-                        match = df_acc[(df_acc['帳號'] == user_id) & (df_acc['密碼'] == user_pwd)]
-                        if not match.empty:
+                        match = df_acc[df_acc['帳號'] == user_id]
+                        if len(match) == 1 and account_password_matches(user_pwd, str(match.iloc[0]['密碼'])):
                             account_row = match.iloc[0].to_dict()
                             st.session_state.logged_in = True
                             st.session_state.user_id = user_id
+                            st.session_state.account_guest_session = False
+                            st.session_state.account_credential_version = hashlib.sha256(str(account_row['密碼']).encode()).hexdigest()
                             st.session_state.user_name = account_row.get('姓名', '未知使用者')
                             st.session_state.user_role = account_row.get('權限', '未設定權限')
                             st.session_state.user_permissions = permissions_for_account(
@@ -6727,12 +6878,35 @@ if not st.session_state.logged_in:
         if st.button("🚀 訪客快速登入 (公用權限)", use_container_width=True, type="secondary"):
             st.session_state.logged_in = True
             st.session_state.user_id = "guest"
+            st.session_state.account_guest_session = True
             st.session_state.user_name = "訪客"
             st.session_state.user_role = "公用"
             st.session_state.user_permissions = permissions_for_account(role="公用")
             st.rerun()
 
     st.stop() # 阻擋未登入者往下執行
+
+# 每次操作重新核對帳號，刪除／降權後不沿用舊登入權限。
+if not st.session_state.get("account_guest_session", st.session_state.user_id == "guest"):
+    try:
+        _, current_accounts = read_managed_accounts()
+        current_matches = [a for a in current_accounts if a["帳號"] == st.session_state.user_id]
+        current_account = current_matches[0] if len(current_matches) == 1 else None
+        credential_version = hashlib.sha256(str(current_account.get("密碼", "")).encode()).hexdigest() if current_account else ""
+        if (not current_account or (st.session_state.get("account_credential_version")
+                and st.session_state.account_credential_version != credential_version)):
+            st.session_state.logged_in = False
+            st.session_state.user_role = ""
+            st.session_state.user_permissions = {}
+            st.session_state.pop("account_credential_version", None)
+            st.rerun()
+        st.session_state.account_credential_version = credential_version
+        st.session_state.user_name = current_account.get("姓名", "")
+        st.session_state.user_role = current_account.get("權限", "")
+        st.session_state.user_permissions = permissions_for_account(role=st.session_state.user_role)
+    except Exception:
+        st.error("無法確認帳號目前權限，請稍後重新整理。")
+        st.stop()
 
 # 權限定義
 can_edit = st.session_state.user_role == "管理者"
@@ -8427,6 +8601,7 @@ if can_edit:
     tab_specs.append(("excel_export", "📥 Excel 匯出"))
     tab_specs.append(("report", "📊 報告專區"))
     tab_specs.append(("dev_admin", "🧪 開發測試區"))
+    tab_specs.append(("accounts", "👤 帳號管理"))
 else:
     if can_access_sales:
         tab_specs.append(("sales", "💼 業務專區"))
@@ -8452,6 +8627,9 @@ tab_installation = tab_map.get("installation")
 tab_order_progress = tab_map.get("order_progress")
 tab_excel_export = tab_map.get("excel_export")
 tab_dev = tab_map.get("dev_admin")
+if "accounts" in tab_map:
+    with tab_map["accounts"]:
+        render_account_management()
 
 # ==================== 分頁 1：晨會當日動態 ====================
 with tab1:
