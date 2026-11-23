@@ -11,7 +11,7 @@ import gspread
 source = Path(__file__).with_name("app.py").read_text(encoding="utf-8")
 compile(source, "app.py", "exec")
 names = {"build_installer_roster", "read_installer_roster", "load_installer_roster",
-         "save_installer_status"}
+         "save_installer_status", "installation_editor_people"}
 nodes = [n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name in names]
 for node in nodes:
     node.decorator_list = []
@@ -74,6 +74,14 @@ except PermissionError:
 else:
     raise AssertionError("non-admin update accepted")
 sheet.append_row.assert_not_called()
+people = ns["installation_editor_people"]
+assert people("原有人員、停用人員\n原有人員", ["新人", "原有人員"]) == (
+    ["原有人員", "停用人員", "新人"], ["原有人員", "停用人員"]
+)
+assert people("未指定", ["新人"]) == (["新人"], [])
+assert people("Mary Lin；停用人員", []) == (["Mary Lin", "停用人員"], ["Mary Lin", "停用人員"])
+assert 'edited_installers = "、".join(selected_installers)' in source
+assert '"安裝人員": edited_installers or "未指定"' in source
 assert "render_installer_management(installer_roster)" in source
 assert 'for value in df_search["安裝人員"]' in source
 print("installer roster tests passed")

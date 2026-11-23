@@ -7693,6 +7693,15 @@ def render_installation_photo_popover(row_data, installation_photos):
                 st.divider()
 
 
+def installation_editor_people(value, active_names):
+    """列出可增選的人員，並保留該筆紀錄原有人員供管理者移除。"""
+    current = list(dict.fromkeys(
+        name.strip() for name in re.split(r"[,，、;；/／\r\n]+", str(value or ""))
+        if name.strip() and name.strip() != "未指定"
+    ))
+    return list(dict.fromkeys([*current, *active_names])), current
+
+
 @st.dialog("📝 詳細資料檢視", on_dismiss=reset_dialog_selection)
 def show_details_dialog(
     row_data,
@@ -7870,12 +7879,20 @@ def show_details_dialog(
                 else:
                     edited_case = selected_case
 
-                edited_installers = st.text_input(
+                installer_options, original_installers = installation_editor_people(
+                    edited_installers, active_installers
+                )
+                if installer_roster is None:
+                    st.warning("暫時無法載入啟用名單，仍可保留或移除此筆原有人員。")
+                selected_installers = st.multiselect(
                     "安裝人員",
-                    value=edited_installers,
-                    help="多人可使用、分隔。",
+                    installer_options,
+                    default=original_installers,
+                    help="可增選啟用人員或移除原有人員；全部移除會存為「未指定」。",
                     key=f"dev_detail_installers_{record_key}",
-                ).strip()
+                )
+                if selected_installers != original_installers:
+                    edited_installers = "、".join(selected_installers)
 
                 st.markdown("#### 項目確認")
                 edit_checklist_lines = st.session_state.get(
