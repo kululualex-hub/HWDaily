@@ -1,7 +1,7 @@
 """Roster lifecycle and history filtering without live Google Sheets access."""
 import ast
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -20,6 +20,7 @@ state = SimpleNamespace(user_role="管理者", user_id="admin")
 state.get = lambda key: getattr(state, key)
 ns = dict(sh=Mock(), st=SimpleNamespace(session_state=state), gspread=gspread,
           datetime=datetime, re=re, installers_list=["原有人員", "另一位"],
+          TAIPEI_TZ=timezone(timedelta(hours=8)), load_installer_attendance_events=Mock(),
           INSTALLER_SETTINGS_SHEET="安裝人員設定",
           INSTALLER_SETTINGS_HEADERS=["姓名", "狀態", "更新時間", "更新者"])
 exec(compile(ast.Module(body=nodes, type_ignores=[]), "app.py", "exec"), ns)
@@ -36,6 +37,7 @@ sheet.update.assert_called_once_with(range_name="A1:D1", values=[ns["INSTALLER_S
 assert sheet.append_row.call_args.args[0][:2] == ["新人", "啟用"]
 assert sheet.append_row.call_args.kwargs["value_input_option"] == "RAW"
 load.clear.assert_called_once()
+ns["load_installer_attendance_events"].clear.assert_called_once()
 ns["sh"].worksheet.side_effect = None
 ns["sh"].worksheet.return_value = sheet
 for blank in ([], [[]], [["", ""]]):

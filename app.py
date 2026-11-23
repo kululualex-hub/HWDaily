@@ -1,7 +1,7 @@
 import streamlit as st
 import gspread
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import base64
 import calendar
@@ -1751,7 +1751,7 @@ def split_installer_names(value):
     """拆分裝機紀錄中的多人姓名。"""
     return [
         name.strip()
-        for name in re.split(r"[,，、;/／\s]+", str(value or ""))
+        for name in re.split(r"[,，、;；/／\r\n]+", str(value or ""))
         if name.strip()
     ]
 
@@ -1762,6 +1762,7 @@ def build_monthly_attendance_summary(
     installer_names,
     installation_records,
     today_date=None,
+    installer_events=(),
 ):
     """以工作日及裝機紀錄計算每位人員的未出勤日期。"""
     selected_year = int(selected_year)
@@ -1794,31 +1795,53 @@ def build_monthly_attendance_summary(
     ]
     checked_work_dates = [day for day in work_dates if day <= today_date]
 
-    normalized_installers = [
-        str(name).strip() for name in installer_names if str(name).strip()
-    ]
-    attendance_dates = {name: set() for name in normalized_installers}
+    default_installers = {str(name).strip() for name in installer_names if str(name).strip()}
+    changes = {}
+    for name, status, effective_date in installer_events:
+        changes.setdefault(name, {})[effective_date] = status
+    expected_dates = {}
+    for name in sorted(default_installers | changes.keys()):
+        events = iter(sorted(changes.get(name, {}).items()))
+        next_event = next(events, None)
+        is_active = name in default_installers
+        days = []
+        for work_date in work_dates:
+            while next_event is not None and next_event[0] <= work_date:
+                is_active = next_event[1] == "啟用"
+                next_event = next(events, None)
+            if is_active:
+                days.append(work_date)
+        if days:
+            expected_dates[name] = days
+    checked_dates = set(checked_work_dates)
+    attendance_dates = {name: set() for name in expected_dates}
     for record in installation_records:
         record_date = parse_installation_record_date(
             record.get("裝機日期", "") or record.get("日期", "")
         )
-        if record_date not in checked_work_dates:
+        if record_date not in checked_dates:
             continue
         for installer_name in split_installer_names(record.get("安裝人員", "")):
             if installer_name in attendance_dates:
                 attendance_dates[installer_name].add(record_date)
+            else:
+                # 相容舊版以空白分隔的多人紀錄，不拆開名單中的完整姓名。
+                for legacy_name in installer_name.split():
+                    if legacy_name in attendance_dates:
+                        attendance_dates[legacy_name].add(record_date)
 
     summary_rows = []
-    for installer_name in normalized_installers:
-        present_dates = attendance_dates[installer_name]
+    for installer_name, days in expected_dates.items():
+        personal_checked_dates = [day for day in days if day in checked_dates]
+        present_dates = attendance_dates[installer_name].intersection(personal_checked_dates)
         missing_dates = [
-            work_date for work_date in checked_work_dates
+            work_date for work_date in personal_checked_dates
             if work_date not in present_dates
         ]
         summary_rows.append({
             "姓名": installer_name,
-            "整月應出勤天數": len(work_dates),
-            "截至統計日應出勤天數": len(checked_work_dates),
+            "整月應出勤天數": len(days),
+            "截至統計日應出勤天數": len(personal_checked_dates),
             "有裝機紀錄天數": len(present_dates),
             "未出勤天數": len(missing_dates),
             "未出勤日期": "、".join(
@@ -1850,18 +1873,27 @@ def render_monthly_attendance_panel():
     """在報告專區顯示每月應出勤與未出勤日期。"""
     st.markdown("### 每月未出勤統計")
     st.caption(
-        "依新版及舊版裝機紀錄判定；應出勤日會扣除星期六、星期日及台灣國定假日。"
+        "只統計人員啟用期間的工作日。啟用或停用自異動當日生效；"
+        "應出勤日扣除週末及台灣國定假日。"
     )
     try:
+        new_records = load_new_installation_records()
+        converted_keys = {record.get("來源鍵") for record in new_records}
         attendance_records = [
-            *load_production_installation_records(),
-            *load_new_installation_records(),
+            *(record for record in legacy_records_for_new_interface()
+              if record["來源鍵"] not in converted_keys),
+            *new_records,
         ]
     except Exception as error:
         st.error(f"裝機資料讀取失敗：{error}")
         return
 
-    today_date = date.today()
+    try:
+        installer_events = load_installer_attendance_events()
+    except Exception:
+        st.error("無法讀取安裝人員異動，暫不顯示未出勤統計。")
+        return
+    today_date = datetime.now(TAIPEI_TZ).date()
     available_years = {today_date.year}
     for record in attendance_records:
         record_date = parse_installation_record_date(
@@ -1894,6 +1926,7 @@ def render_monthly_attendance_panel():
         installers_list,
         attendance_records,
         today_date=today_date,
+        installer_events=installer_events,
     )
     metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
     with metric_col1:
@@ -1903,7 +1936,7 @@ def render_monthly_attendance_panel():
     with metric_col3:
         st.metric("扣除平日國定假日", attendance_info["平日國定假日天數"])
     with metric_col4:
-        st.metric("整月應出勤天數", attendance_info["整月應出勤天數"])
+        st.metric("整月工作日", attendance_info["整月應出勤天數"])
 
     selected_period_end = attendance_info["月份結束"]
     if selected_period_end > today_date:
@@ -1925,6 +1958,9 @@ def render_monthly_attendance_panel():
     else:
         st.caption("本月沒有落在星期一至星期五的國定假日。")
 
+    if attendance_df.empty:
+        st.info("所選月份沒有啟用期間落在工作日的人員。")
+        return
     st.dataframe(
         attendance_df,
         hide_index=True,
@@ -8605,6 +8641,7 @@ if st.session_state.dev_pending_delete:
 installers_list = ["鍾博宇", "黃政欽", "張智偉", "林嬴燦", "吳建華", "何乙霆"]
 INSTALLER_SETTINGS_SHEET = "安裝人員設定"
 INSTALLER_SETTINGS_HEADERS = ["姓名", "狀態", "更新時間", "更新者"]
+TAIPEI_TZ = timezone(timedelta(hours=8))
 
 
 def build_installer_roster(rows):
@@ -8634,6 +8671,31 @@ def load_installer_roster():
     return read_installer_roster(worksheet)
 
 
+def parse_installer_attendance_events(values):
+    if not any(any(str(cell).strip() for cell in row) for row in values):
+        return []
+    if list(values[0]) != INSTALLER_SETTINGS_HEADERS[:3]:
+        raise ValueError("安裝人員異動欄位格式不符。")
+    events = []
+    for row in values[1:]:
+        if len(row) < 2 or not str(row[0]).strip() or row[1] not in {"啟用", "停用"}:
+            continue
+        effective_date = parse_installation_record_date(row[2]) if len(row) >= 3 else None
+        if effective_date is None:
+            raise ValueError("安裝人員異動缺少有效日期。")
+        events.append((str(row[0]).strip(), row[1], effective_date))
+    return events
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_installer_attendance_events():
+    try:
+        worksheet = sh.worksheet(INSTALLER_SETTINGS_SHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        return []
+    return parse_installer_attendance_events(worksheet.get("A1:C"))
+
+
 def save_installer_status(name, status, *, new=False):
     if st.session_state.get("user_role") != "管理者":
         raise PermissionError("僅管理者可設定安裝人員。")
@@ -8655,10 +8717,11 @@ def save_installer_status(name, status, *, new=False):
     if not worksheet.row_values(1):
         worksheet.update(range_name="A1:D1", values=[INSTALLER_SETTINGS_HEADERS], raw=True)
     worksheet.append_row(
-        [name, status, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), st.session_state.user_id],
+        [name, status, datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M:%S"), st.session_state.user_id],
         value_input_option="RAW", table_range="A:D",
     )
     load_installer_roster.clear()
+    load_installer_attendance_events.clear()
 
 
 def render_installer_management(roster):
