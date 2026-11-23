@@ -29,7 +29,7 @@ ns["sh"].worksheet.side_effect = gspread.exceptions.WorksheetNotFound
 assert load() == {"原有人員": "啟用", "另一位": "啟用"}
 ns["sh"].add_worksheet.assert_not_called()
 ns["sh"].add_worksheet.return_value = sheet
-sheet.get.return_value = []
+sheet.get.return_value = [[]]  # Actual response from Google's blank tab.
 sheet.row_values.return_value = []
 save(" 新人 ", "啟用", new=True)
 sheet.update.assert_called_once_with(range_name="A1:D1", values=[ns["INSTALLER_SETTINGS_HEADERS"]], raw=True)
@@ -38,6 +38,17 @@ assert sheet.append_row.call_args.kwargs["value_input_option"] == "RAW"
 load.clear.assert_called_once()
 ns["sh"].worksheet.side_effect = None
 ns["sh"].worksheet.return_value = sheet
+for blank in ([], [[]], [["", ""]]):
+    sheet.get.return_value = blank
+    assert load() == {"原有人員": "啟用", "另一位": "啟用"}
+for invalid in ([["錯誤標題", "狀態"]], [[], ["新人", "啟用"]]):
+    sheet.get.return_value = invalid
+    try:
+        load()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unexpected roster schema accepted")
 sheet.row_values.return_value = ns["INSTALLER_SETTINGS_HEADERS"]
 sheet.get.return_value = [["姓名", "狀態"], ["新人", "啟用"], ["原有人員", "停用"]]
 assert load() == {"原有人員": "停用", "另一位": "啟用", "新人": "啟用"}

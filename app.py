@@ -8600,7 +8600,10 @@ def build_installer_roster(rows):
 
 def read_installer_roster(worksheet):
     values = worksheet.get("A1:B", value_render_option="UNFORMATTED_VALUE")
-    if values and list(values[0]) != INSTALLER_SETTINGS_HEADERS[:2]:
+    # Google Sheets 可能把全空分頁回傳成 [[]]，並非表頭損壞。
+    if not any(any(str(cell).strip() for cell in row) for row in values):
+        return build_installer_roster([])
+    if list(values[0]) != INSTALLER_SETTINGS_HEADERS[:2]:
         raise ValueError("安裝人員設定的欄位格式不符。")
     return build_installer_roster(values[1:])
 
