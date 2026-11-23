@@ -8586,6 +8586,102 @@ if st.session_state.dev_pending_delete:
 
 # ==================== 4. 建立功能分頁 ====================
 installers_list = ["鍾博宇", "黃政欽", "張智偉", "林嬴燦", "吳建華", "何乙霆"]
+INSTALLER_SETTINGS_SHEET = "安裝人員設定"
+INSTALLER_SETTINGS_HEADERS = ["姓名", "狀態", "更新時間", "更新者"]
+
+
+def build_installer_roster(rows):
+    roster = {name: "啟用" for name in installers_list}
+    for row in rows:
+        if len(row) >= 2 and str(row[0]).strip() and row[1] in {"啟用", "停用"}:
+            roster[str(row[0]).strip()] = row[1]
+    return roster
+
+
+def read_installer_roster(worksheet):
+    values = worksheet.get("A1:B", value_render_option="UNFORMATTED_VALUE")
+    if values and list(values[0]) != INSTALLER_SETTINGS_HEADERS[:2]:
+        raise ValueError("安裝人員設定的欄位格式不符。")
+    return build_installer_roster(values[1:])
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_installer_roster():
+    try:
+        worksheet = sh.worksheet(INSTALLER_SETTINGS_SHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        return build_installer_roster([])
+    return read_installer_roster(worksheet)
+
+
+def save_installer_status(name, status, *, new=False):
+    if st.session_state.get("user_role") != "管理者":
+        raise PermissionError("僅管理者可設定安裝人員。")
+    name = name.strip()
+    if (not name or len(name) > 60 or re.search(r"[,，、;；\r\n]", name)
+            or name in {"未指定", "(全部)", "（全部）"}):
+        raise ValueError("請輸入單一姓名，不可包含分隔符號或使用保留名稱。")
+    if status not in {"啟用", "停用"}:
+        raise ValueError("安裝人員狀態無效。")
+    try:
+        worksheet = sh.worksheet(INSTALLER_SETTINGS_SHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = sh.add_worksheet(title=INSTALLER_SETTINGS_SHEET, rows=100, cols=4)
+    roster = read_installer_roster(worksheet)
+    if new and any(existing.casefold() == name.casefold() for existing in roster):
+        raise ValueError("這位人員已存在；若已停用，請從下方重新啟用。")
+    if not new and (name not in roster or roster[name] == status):
+        raise ValueError("名單已更新，請重新整理後再操作。")
+    if not worksheet.row_values(1):
+        worksheet.update(range_name="A1:D1", values=[INSTALLER_SETTINGS_HEADERS], raw=True)
+    worksheet.append_row(
+        [name, status, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), st.session_state.user_id],
+        value_input_option="RAW", table_range="A:D",
+    )
+    load_installer_roster.clear()
+
+
+def render_installer_management(roster):
+    st.markdown("#### 安裝人員")
+    st.caption("啟用的人員可在新舊版新增裝機表單選取；停用不影響既有紀錄，也可重新啟用。")
+    if roster is None:
+        st.error("無法讀取安裝人員設定，請稍後重新整理。")
+        return
+    if st.session_state.get("installer_management_flash"):
+        st.success(st.session_state.pop("installer_management_flash"))
+    st.dataframe([{"姓名": name, "狀態": status} for name, status in roster.items()],
+                 hide_index=True, use_container_width=True)
+
+    def apply_status(name, status, *, new=False):
+        try:
+            save_installer_status(name, status, new=new)
+        except (PermissionError, ValueError) as error:
+            st.error(str(error))
+            return
+        except Exception:
+            st.error("無法確認儲存結果，請重新整理名單後再試。")
+            return
+        st.session_state.installer_management_flash = f"已{status}安裝人員：{name.strip()}"
+        st.rerun()
+
+    with st.form("installer_management_add", clear_on_submit=True):
+        name = st.text_input("新增安裝人員姓名")
+        if st.form_submit_button("新增人員"):
+            apply_status(name, "啟用", new=True)
+    selected = st.selectbox("選擇要管理的人員", list(roster), index=None, key="installer_management_select")
+    if selected:
+        next_status = "停用" if roster[selected] == "啟用" else "啟用"
+        if st.button(f"確認{next_status}「{selected}」", key="installer_management_status"):
+            apply_status(selected, next_status)
+
+
+installer_roster = None
+if can_add:
+    try:
+        installer_roster = load_installer_roster()
+    except Exception:
+        pass
+active_installers = [name for name, status in (installer_roster or {}).items() if status == "啟用"]
 
 tab_specs = [("morning", "🌅 晨會當日動態")]
 if can_add:
@@ -8766,6 +8862,8 @@ if tab2 is not None:
             )
         else:
             st.markdown("### 新增裝機紀錄")
+            if installer_roster is None:
+                st.warning("安裝人員名單暫時無法讀取，請重新整理後再新增紀錄。")
             st.caption("請先完成廠別、案件與機台名稱識別，系統檢查舊紀錄後才會開放其餘欄位。")
 
             dev_key = st.session_state.dev_add_form_key
@@ -9093,7 +9191,7 @@ if tab2 is not None:
                     with work_col2:
                         dev_installers = st.multiselect(
                             "安裝人員",
-                            installers_list,
+                            active_installers,
                             key=f"dev_installers_{dev_key}",
                         )
 
@@ -9122,6 +9220,7 @@ if tab2 is not None:
                         "產生送出預覽",
                         type="primary",
                         use_container_width=True,
+                        disabled=installer_roster is None,
                     )
 
                 if preview_submitted:
@@ -9449,7 +9548,7 @@ with tab3:
             dev_search_installers = ["（全部）"] + sorted({
                 installer.strip()
                 for record in combined_results_records
-                for installer in re.split(",|、", str(record.get("安裝人員", "")))
+                for installer in re.split(r"[,，、;；\r\n]+", str(record.get("安裝人員", "")))
                 if installer.strip() and installer.strip() != "未指定"
             })
             dev_search_installer = st.selectbox(
@@ -9499,7 +9598,7 @@ with tab3:
                 dev_search_installer != "（全部）"
                 and dev_search_installer not in {
                     installer.strip()
-                    for installer in re.split(",|、", str(record.get("安裝人員", "")))
+                    for installer in re.split(r"[,，、;；\r\n]+", str(record.get("安裝人員", "")))
                     if installer.strip()
                 }
             ):
@@ -9867,12 +9966,12 @@ if can_edit and tab_dev is not None:
 
                 with col2:
                     status = st.selectbox("狀態:", ["未完成", "缺料", "已完成"], key=f"add_status_{k_suffix}")
-                    installers = st.multiselect("安裝人員 (可複選):", installers_list, key=f"add_installers_{k_suffix}")
+                    installers = st.multiselect("安裝人員 (可複選):", active_installers, key=f"add_installers_{k_suffix}")
                     remark = st.text_area("Remark (備忘):", height=130, key=f"add_remark_{k_suffix}")
 
                 b_col1, b_col2 = st.columns(2)
                 with b_col1:
-                    btn_submit = st.button("💾 新增紀錄", type="primary", key="btn_add")
+                    btn_submit = st.button("💾 新增紀錄", type="primary", key="btn_add", disabled=installer_roster is None)
                 with b_col2:
                     if st.button("🗑️ 清空欄位", key="btn_clear_form"):
                         st.session_state.add_form_key += 1
@@ -10086,6 +10185,7 @@ if can_edit and tab_dev is not None:
 
             render_option_manager("廠別", "dev_plant_options", "dev_plant")
             render_option_manager("案件", "dev_case_options", "dev_case")
+            render_installer_management(installer_roster)
 
         with dev_development_tab:
             st.markdown("### 開發專區")
@@ -10242,7 +10342,12 @@ if can_edit and tab_dev is not None:
                     set(str(x).strip() for x in df_search['廠別'] if str(x).strip()),
                     key=natural_plant_sort_key,
                 )
-                unique_installers = ["(全部)"] + installers_list
+                unique_installers = ["(全部)"] + sorted({
+                    name.strip()
+                    for value in df_search["安裝人員"]
+                    for name in re.split(r"[,，、;；\r\n]+", str(value))
+                    if name.strip() and name.strip() not in {"未指定", "(全部)"}
+                })
 
                 st.markdown("##### 1. 設定搜尋條件 (設定完畢後請點擊下方搜尋按鈕)")
                 col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
@@ -10286,7 +10391,12 @@ if can_edit and tab_dev is not None:
                         if search_plant != "(全部)": filtered_df = filtered_df[filtered_df['廠別'].astype(str).str.strip() == search_plant]
                         if search_machine not in ["(全部)", "(請先選擇廠別)"]: filtered_df = filtered_df[filtered_df['機台名稱'].astype(str).str.strip() == search_machine]
                         if search_case not in ["(全部)", "(請先選擇廠別)"]: filtered_df = filtered_df[filtered_df['案件'].astype(str).str.strip() == search_case]
-                        if search_installer != "(全部)": filtered_df = filtered_df[filtered_df['安裝人員'].astype(str).str.contains(search_installer)]
+                        if search_installer != "(全部)":
+                            filtered_df = filtered_df[filtered_df["安裝人員"].map(
+                                lambda value: search_installer in {
+                                    name.strip() for name in re.split(r"[,，、;；\r\n]+", str(value))
+                                }
+                            )]
 
                         st.session_state.tab3_filtered_df = filtered_df
                         st.session_state.tab3_search_active = True
