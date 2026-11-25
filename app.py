@@ -242,6 +242,7 @@ NEW_INSTALLATION_HEADERS = [
 CUSTOM_CASE_PENDING_SOURCE = "新版輸入-其他案件待確認"
 CUSTOM_CASE_SETUP_SOURCE = "新版輸入-其他案件待設定"
 CUSTOM_CASE_CONFIRMED_SOURCE = "新版輸入-其他案件已確認"
+CUSTOM_CASE_NOT_REQUIRED_SOURCE = "新版輸入-其他案件不須確認"
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -8102,6 +8103,35 @@ def dismiss_custom_case_confirmation_dialog():
     st.session_state.custom_case_return_to_confirmation = False
 
 
+def mark_custom_installation_confirmation_not_required(record):
+    """只寫入待確認標記與修改資訊，不改動裝機內容。"""
+    if not st.session_state.get("user_permissions", {}).get(
+        "installation_access", st.session_state.get("user_role") == "管理者"
+    ):
+        raise PermissionError("目前帳號沒有設定裝機確認案件的權限。")
+    record_id = str(record.get("紀錄ID", "")).strip()
+    row_number = int(record.get("_new_sheet_row", 0) or 0)
+    if not record_id or row_number < 2:
+        raise ValueError("找不到這筆裝機紀錄，請重新整理清單。")
+    sheet = get_new_installation_worksheet()
+    current = sheet.row_values(row_number)
+    source_index = NEW_INSTALLATION_HEADERS.index("來源版本")
+    if (len(current) <= source_index or str(current[0]).strip() != record_id
+            or str(current[source_index]).strip() not in {CUSTOM_CASE_PENDING_SOURCE, CUSTOM_CASE_SETUP_SOURCE}):
+        raise ValueError("此筆案件已處理或紀錄位置已變更，請重新整理清單。")
+    updates = {
+        "來源版本": CUSTOM_CASE_NOT_REQUIRED_SOURCE,
+        "更新時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "最後修改者": f"{st.session_state.user_name} ({st.session_state.user_role})",
+    }
+    sheet.batch_update([
+        {"range": gspread.utils.rowcol_to_a1(row_number, NEW_INSTALLATION_HEADERS.index(field) + 1),
+         "values": [[value]]}
+        for field, value in updates.items()
+    ], value_input_option="RAW")
+    load_new_installation_records.clear()
+
+
 @st.dialog("✅ 確認其他案件", on_dismiss=dismiss_custom_case_confirmation_dialog)
 def show_custom_case_confirmation_dialog(record):
     """確認新版其他案件名稱，並代入或建立案件確認項目。"""
@@ -8170,7 +8200,7 @@ def show_custom_case_confirmation_dialog(record):
         value=not bool(checklist_labels),
         key=f"custom_case_enter_settings_{case_selection_key}",
     )
-    confirm_col, later_col = st.columns(2)
+    confirm_col, skip_col, later_col = st.columns(3)
     with confirm_col:
         if st.button(
             "確認案件名稱",
@@ -8230,6 +8260,26 @@ def show_custom_case_confirmation_dialog(record):
                 st.rerun()
             except Exception as error:
                 st.error(f"其他案件確認失敗：{error}")
+    with skip_col:
+        if st.button(
+            "不須確認",
+            use_container_width=True,
+            help="移出待確認清單，不修改案件名稱、施工狀態或確認項目。",
+            key=f"custom_case_not_required_{record.get('紀錄ID', '')}",
+        ):
+            try:
+                mark_custom_installation_confirmation_not_required(record)
+            except (PermissionError, ValueError) as error:
+                st.error(str(error))
+            except Exception:
+                st.error("未能確認儲存結果，請重新整理清單後再試。")
+            else:
+                st.session_state.custom_case_setup_record_id = ""
+                st.session_state.custom_case_return_to_confirmation = False
+                st.session_state.custom_case_confirmation_grid_key += 1
+                st.session_state.dev_flash_level = "success"
+                st.session_state.dev_flash_message = f"已將「{current_case or '未命名'}」標為不須確認。"
+                st.rerun()
     with later_col:
         if st.button(
             "稍後處理",
