@@ -2158,7 +2158,8 @@ def render_report_area():
 
     st.divider()
     st.markdown("### 未紀錄項目與資料修改")
-    render_unrecorded_installation_items_panel(report_df)
+    st.button("前往訂單差異待確認", key="report_to_order_review",
+              on_click=open_admin_page, args=("order_review",))
 
     with st.expander("✏️ 修改報告資料", expanded=False):
         st.caption("依序選擇區域、廠區與工程名稱後，系統會自動帶入目前數量。")
@@ -2356,7 +2357,8 @@ def render_report_area():
     )
 
     st.divider()
-    render_monthly_attendance_panel()
+    st.button("前往每月未出勤", key="report_to_attendance",
+              on_click=open_admin_page, args=("attendance",))
 
     st.divider()
     st.markdown("### 📥 報告統計 Excel 匯出")
@@ -2420,9 +2422,6 @@ def render_report_area():
         key="report_statistics_excel_download",
         help="依所選年度匯出全部工程，分成全體、北、中、南、國外五個工作表，套用各自的標準線設定。",
     )
-
-    render_installation_excel_version_area()
-
 
 def installation_record_source_key(prefix, record, row_number=None):
     """產生穩定來源鍵，用來避免舊版或開發暫存資料被重複轉入。"""
@@ -3953,6 +3952,8 @@ def queue_checklist_navigation(case_name):
     """安排下一次重跑時切換到指定案件的確認項目設定。"""
     st.session_state.dev_checklist_navigation_case = str(case_name or "").strip()
     st.session_state.dev_option_manager_key += 1
+    if st.session_state.get("user_role") == "管理者":
+        open_admin_page("options")
 
 
 def render_sales_area():
@@ -6318,7 +6319,21 @@ def build_comparison_order_progress(additions, installations):
     return {"進行中": active, "已完成": completed, "無資料": unmatched}
 
 
-def render_order_progress_area():
+def load_order_progress_groups(new_records=None, legacy_records=None):
+    additions = [row for comparison in load_installation_excel_comparisons()
+                 for row in comparison.get("已確認新增訂單", [])]
+    if new_records is None:
+        new_records = load_new_installation_records()
+    if legacy_records is None:
+        legacy_records = legacy_records_for_new_interface()
+    converted_keys = {record.get("來源鍵") for record in new_records if record.get("來源鍵")}
+    return build_comparison_order_progress(
+        additions, [*(record for record in legacy_records if record.get("來源鍵") not in converted_keys),
+                    *new_records]
+    )
+
+
+def render_order_progress_area(show_unmatched=False):
     st.markdown("### 訂單進度區")
     st.caption(
         "依已確認列入統計的新增訂單比對裝機紀錄。訂單數量保留原值，"
@@ -6327,15 +6342,10 @@ def render_order_progress_area():
         "空白及最後四碼項次（例如 -0001）。"
     )
     try:
-        additions = [row for comparison in load_installation_excel_comparisons()
-                     for row in comparison.get("已確認新增訂單", [])]
-        new_records = load_new_installation_records()
-        converted_keys = {r.get("來源鍵") for r in new_records if r.get("來源鍵")}
-        legacy_records = [r for r in legacy_records_for_new_interface()
-                          if r.get("來源鍵") not in converted_keys]
-        groups = build_comparison_order_progress(additions, [*legacy_records, *new_records])
+        groups = load_order_progress_groups()
         names = ["進行中", "已完成", "無資料"]
-        for name, tab in zip(names, st.tabs(names)):
+        progress_tabs = st.tabs(names, default="無資料") if show_unmatched else st.tabs(names)
+        for name, tab in zip(names, progress_tabs):
             with tab:
                 rows = groups[name]
                 if name == "無資料":
@@ -6467,10 +6477,13 @@ def render_legacy_order_progress_area():
         st.caption("訂單進度刪除功能僅限管理者使用。")
 
 
-def render_installation_confirmation_area(can_download):
-    """顯示業務待確認項目、已交接附件與新版輸入的其他案件。"""
-    st.markdown("### 裝機確認區")
+def render_admin_order_review():
+    if st.session_state.get("user_role") != "管理者":
+        return
+    st.header("訂單差異待確認")
     st.caption("客戶訂單比對差異會依廠區、品號與既有工程對照分類；確認前不更新統計。")
+    with st.expander("客戶訂單明細 Excel 比較"):
+        render_installation_excel_version_area()
     try:
         pending_report_df = load_report_entry_records()
         if pending_report_df.empty:
@@ -6478,12 +6491,27 @@ def render_installation_confirmation_area(can_download):
         pending_report_df = pending_report_df.drop_duplicates(
             subset=["年度", "區域", "廠區", "工程名稱"], keep="last"
         ).reset_index(drop=True)
-        if st.session_state.get("user_role") == "管理者":
-            render_unrecorded_installation_items_panel(pending_report_df, scope="confirmation")
-        else:
-            st.info("客戶訂單差異的統計確認由管理者處理。")
+        render_unrecorded_installation_items_panel(pending_report_df, scope="confirmation")
     except Exception as error:
         st.error(f"客戶訂單差異待確認清單讀取失敗：{error}")
+
+
+def select_pending_custom_installation_cases(records):
+    return sorted(
+        (record for record in records if str(record.get("來源版本", "")).strip()
+         in {CUSTOM_CASE_PENDING_SOURCE, CUSTOM_CASE_SETUP_SOURCE}),
+        key=lambda record: (str(record.get("更新時間", "")),
+                            str(record.get("建立時間", "")), str(record.get("紀錄ID", ""))),
+        reverse=True,
+    )
+
+
+def render_installation_confirmation_area(can_download):
+    """顯示業務待確認項目、已交接附件與新版輸入的其他案件。"""
+    st.markdown("### 裝機確認區")
+    if st.session_state.get("user_role") == "管理者":
+        st.button("前往訂單差異待確認", key="confirmation_to_order_review",
+                  on_click=open_admin_page, args=("order_review",))
     with st.expander("廠區＋品號與工程對照", expanded=False):
         st.caption(
             "處理未紀錄項目並確認列入統計時保存；同廠區、品號以最後確認的工程為準。"
@@ -6657,20 +6685,7 @@ def render_installation_confirmation_area(can_download):
         for index, record in enumerate(st.session_state.dev_development_records)
         if str(record.get("背鍋俠確認時間", "")).strip()
     ]
-    custom_case_records = sorted(
-        [
-            record
-            for record in load_new_installation_records()
-            if str(record.get("來源版本", "")).strip()
-            in {CUSTOM_CASE_PENDING_SOURCE, CUSTOM_CASE_SETUP_SOURCE}
-        ],
-        key=lambda record: (
-            str(record.get("更新時間", "")),
-            str(record.get("建立時間", "")),
-            str(record.get("紀錄ID", "")),
-        ),
-        reverse=True,
-    )
+    custom_case_records = select_pending_custom_installation_cases(load_new_installation_records())
     if not confirmed_records and not custom_case_records and not pending_sales_records:
         st.info("目前沒有其他裝機確認資料。")
         return
@@ -6772,6 +6787,10 @@ def render_installation_confirmation_area(can_download):
             render_development_delete_button(record_index, "installation_confirmation")
 
     st.divider()
+    render_custom_installation_cases(custom_case_records)
+
+
+def render_custom_installation_cases(custom_case_records):
     st.markdown("#### 新版裝機的其他案件")
     st.caption("勾選一筆案件後，可調整案件名稱、代入既有確認項目，並決定是否前往項目確認設定。")
     if not custom_case_records:
@@ -6979,6 +6998,7 @@ with st.sidebar:
         st.session_state.user_name = ""
         st.session_state.user_role = ""
         st.session_state.user_permissions = {}
+        st.session_state.pop("admin_page", None)
         st.rerun()
 
 st.title("📊 鴻伍裝機日報系統 (Web 雲端版)")
@@ -8722,6 +8742,78 @@ if can_add:
         pass
 active_installers = [name for name, status in (installer_roster or {}).items() if status == "啟用"]
 
+ADMIN_NAV_GROUPS = (
+    ("裝機作業", (("morning", "晨會動態"), ("add", "新增裝機紀錄"),
+                 ("search", "歷史搜尋與修改"), ("tracking", "待追蹤清單"))),
+    ("訂單與確認", (("sales", "業務專區"), ("order_progress", "訂單進度"),
+                     ("order_review", "訂單差異待確認"), ("installation", "裝機確認"),
+                     ("custom_cases", "新版裝機的其他案件"))),
+    ("報告與匯出", (("report", "工程統計／報表下載"), ("attendance", "每月未出勤"),
+                     ("excel_export", "裝機確認表匯出"))),
+    ("系統設定", (("accounts", "帳號與權限"), ("installers", "安裝人員"),
+                   ("options", "廠別／案件與確認項目"))),
+    ("開發與舊版工具", (("dev_admin", "開發測試區"),)),
+)
+ADMIN_PAGE_LABELS = {"overview": "管理總覽",
+                     **{key: label for _, entries in ADMIN_NAV_GROUPS for key, label in entries}}
+
+
+def open_admin_page(page):
+    if st.session_state.get("user_role") != "管理者" or page not in ADMIN_PAGE_LABELS:
+        return
+    st.session_state.admin_page = page
+    if page in {"options", "dev_admin"}:
+        st.session_state.pop("dev_active_tab", None)
+
+
+def needs_installation_tracking(record):
+    return (str(record.get("狀態", "")).strip() not in {"", "執行中", "完成", "已完成"}
+            and bool(str(record.get("機台名稱", "")).strip()))
+
+
+def render_admin_overview():
+    st.header("管理總覽")
+    st.caption("先處理待辦，再前往各作業頁；總覽不直接修改資料。")
+    tracking = review = custom_cases = "—"
+    try:
+        new_records = load_new_installation_records()
+        custom_cases = len(select_pending_custom_installation_cases(new_records))
+        legacy_records = legacy_records_for_new_interface()
+        converted = {record.get("來源鍵") for record in new_records}
+        tracking = sum(needs_installation_tracking(record) for record in new_records)
+        tracking += sum(needs_installation_tracking(record) for record in legacy_records
+                        if record.get("來源鍵") not in converted)
+    except Exception:
+        pass
+    try:
+        review = sum(
+            unrecorded_item_display_category(item) != "人力"
+            for item in load_unrecorded_installation_items()
+        )
+    except Exception:
+        pass
+    for column, (label, count, page) in zip(st.columns(3), [
+        ("裝機待追蹤", tracking, "tracking"),
+        ("訂單差異待確認", review, "order_review"),
+        ("新版裝機的其他案件", custom_cases, "custom_cases"),
+    ]):
+        with column:
+            st.metric(label, count, border=True)
+            st.button(f"開啟{label}", key=f"admin_card_{page}", on_click=open_admin_page,
+                      args=(page,), use_container_width=True)
+    if "—" in (tracking, review, custom_cases):
+        st.caption("「—」表示暫時無法取得筆數，可開啟作業頁查看。")
+    st.caption("訂單差異待確認筆數不含人力；人力仍可在待確認清單的「人力」分類查看。")
+    st.subheader("常用捷徑")
+    for column, (label, page) in zip(st.columns(4), [
+        ("新增裝機", "add"), ("歷史搜尋", "search"),
+        ("下拉式選項管理", "options"), ("報表下載", "report"),
+    ]):
+        with column:
+            st.button(label, key=f"admin_shortcut_{page}", on_click=open_admin_page,
+                      args=(page,), use_container_width=True)
+
+
 tab_specs = [("morning", "🌅 晨會當日動態")]
 if can_add:
     tab_specs.append(("add", "📝 新增裝機紀錄"))
@@ -8749,13 +8841,36 @@ else:
     if can_access_excel_export:
         tab_specs.append(("excel_export", "📥 Excel 匯出"))
 
-tabs = st.tabs([label for _, label in tab_specs])
-tab_map = {tab_key: tab for (tab_key, _), tab in zip(tab_specs, tabs)}
-tab1 = tab_map["morning"]
+admin_page = None
+if can_edit:
+    admin_page = st.session_state.get("admin_page", "overview")
+    if admin_page not in ADMIN_PAGE_LABELS:
+        admin_page = "overview"
+    with st.sidebar:
+        st.divider()
+        st.button("管理總覽", key="admin_nav_overview", on_click=open_admin_page,
+                  args=("overview",), use_container_width=True,
+                  type="primary" if admin_page == "overview" else "secondary")
+        for group, entries in ADMIN_NAV_GROUPS:
+            with st.expander(group, expanded=any(
+                key == admin_page
+                for key, _ in entries
+            )):
+                for key, label in entries:
+                    selected = key == admin_page
+                    st.button(label, key=f"admin_nav_{key}", on_click=open_admin_page,
+                              args=(key,), use_container_width=True,
+                              type="primary" if selected else "secondary")
+    target = "dev_admin" if admin_page == "options" else admin_page
+    tab_map = {target: st.container()}
+else:
+    tabs = st.tabs([label for _, label in tab_specs])
+    tab_map = {tab_key: tab for (tab_key, _), tab in zip(tab_specs, tabs)}
+tab1 = tab_map.get("morning")
 tab_report = tab_map.get("report")
 tab2 = tab_map.get("add")
-tab3 = tab_map["search"]
-tab4 = tab_map["tracking"]
+tab3 = tab_map.get("search")
+tab4 = tab_map.get("tracking")
 tab_sales = tab_map.get("sales")
 tab_development = tab_map.get("development")
 tab_installation = tab_map.get("installation")
@@ -8765,9 +8880,30 @@ tab_dev = tab_map.get("dev_admin")
 if "accounts" in tab_map:
     with tab_map["accounts"]:
         render_account_management()
+if admin_page == "overview":
+    with tab_map["overview"]:
+        render_admin_overview()
+elif admin_page == "attendance":
+    with tab_map["attendance"]:
+        render_monthly_attendance_panel()
+elif admin_page == "order_review":
+    with tab_map["order_review"]:
+        render_admin_order_review()
+elif admin_page == "installers":
+    with tab_map["installers"]:
+        render_installer_management(installer_roster)
+elif admin_page == "custom_cases":
+    with tab_map["custom_cases"]:
+        initialize_dev_cloud_data()
+        try:
+            custom_cases = select_pending_custom_installation_cases(load_new_installation_records())
+        except Exception as error:
+            st.error(f"新版裝機的其他案件讀取失敗：{error}")
+        else:
+            render_custom_installation_cases(custom_cases)
 
 # ==================== 分頁 1：晨會當日動態 ====================
-with tab1:
+def render_morning_page():
     st.subheader("查詢晨會動態")
     target_date = st.date_input("選擇日期", datetime.now(), key="morning_date")
     
@@ -8869,6 +9005,10 @@ with tab1:
                 show_details_dialog(filtered_df.iloc[selected_idx], 'tab1_grid_key')
         else:
             st.info(f"📅 該日尚無裝機紀錄。")
+
+if tab1 is not None:
+    with tab1:
+        render_morning_page()
 
 # ==================== 管理員專屬：報告專區 ====================
 if can_edit and tab_report is not None:
@@ -9494,7 +9634,9 @@ if tab2 is not None:
                     st.rerun()
 
 # ==================== 分頁 3：新版裝機資料搜尋與修改 ====================
-with tab3:
+def render_history_search_page():
+    if can_edit:
+        initialize_dev_cloud_data()
     st.markdown("### 新版裝機資料搜尋與修改")
     st.caption("此處合併顯示新版與舊版裝機資料；舊版修改後會轉存為新版，原始資料保持不變。")
 
@@ -9772,8 +9914,14 @@ with tab3:
         "舊版資料只讀取、不覆寫。"
     )
 
+if tab3 is not None:
+    with tab3:
+        render_history_search_page()
+
 # ==================== 分頁 4：待追蹤清單與狀態更新 ====================
-with tab4:
+def render_tracking_page():
+    if can_edit:
+        initialize_dev_cloud_data()
     st.subheader("📌 待追蹤機台與狀態更新")
     new_tracking_records = load_new_installation_records()
     converted_legacy_keys = {
@@ -9804,11 +9952,7 @@ with tab4:
     ])
 
     pending_records = [
-        record
-        for record in combined_tracking_records
-        if str(record.get("狀態", "")).strip()
-        not in {"", "執行中", "完成", "已完成"}
-        and str(record.get("機台名稱", "")).strip()
+        record for record in combined_tracking_records if needs_installation_tracking(record)
     ]
 
     if pending_records:
@@ -9892,6 +10036,10 @@ with tab4:
         st.success("🎉 新版與舊版皆沒有待追蹤項目。")
 
 
+if tab4 is not None:
+    with tab4:
+        render_tracking_page()
+
 # ==================== 依帳號權限顯示業務／開發專區 ====================
 if tab_sales is not None:
     with tab_sales:
@@ -9972,7 +10120,7 @@ if can_edit and tab_dev is not None:
         ],
             default=(
                 "⚙️ 下拉選項管理"
-                if requested_checklist_case
+                if (requested_checklist_case or admin_page == "options") and not return_to_custom_case
                 else "✅ 裝機確認區" if return_to_custom_case else None
             ),
             key="dev_active_tab",
@@ -10218,13 +10366,15 @@ if can_edit and tab_dev is not None:
                             st.session_state.custom_case_return_to_confirmation = True
                             st.session_state.dev_checklist_navigation_case = ""
                             st.session_state.pop("dev_active_tab", None)
+                            open_admin_page("custom_cases")
                         st.rerun()
                 else:
                     st.info("請先新增案件，才能設定確認項目。")
 
             render_option_manager("廠別", "dev_plant_options", "dev_plant")
             render_option_manager("案件", "dev_case_options", "dev_case")
-            render_installer_management(installer_roster)
+            st.button("前往安裝人員設定", key="legacy_options_to_installers",
+                      on_click=open_admin_page, args=("installers",))
 
         with dev_development_tab:
             st.markdown("### 開發專區")

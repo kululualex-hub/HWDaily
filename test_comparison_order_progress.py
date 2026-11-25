@@ -83,13 +83,16 @@ ns.update(st=ui,
           load_new_installation_records=lambda: [record],
           legacy_records_for_new_interface=lambda: [],
           render_legacy_order_progress_area=MagicMock())
-render_node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
-                   and n.name == 'render_order_progress_area')
-exec(compile(ast.Module(body=[render_node], type_ignores=[]), 'app.py', 'exec'), ns)
+render_nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name in {'render_order_progress_area', 'load_order_progress_groups'}]
+exec(compile(ast.Module(body=render_nodes, type_ignores=[]), 'app.py', 'exec'), ns)
 ns['render_order_progress_area']()
 ui.tabs.assert_called_once_with(['進行中', '已完成', '無資料'])
 ui.error.assert_not_called()
 frame = ui.dataframe.call_args.args[0]
 assert frame.iloc[0]['已安裝'] == 1 and frame.iloc[0]['待安裝'] == 1
 assert '未交數量' not in frame.columns and '已交數量' not in frame.columns
+ui.tabs.reset_mock()
+ns['render_order_progress_area'](show_unmatched=True)
+ui.tabs.assert_called_once_with(['進行中', '已完成', '無資料'], default='無資料')
 print('order progress rendering tests passed')

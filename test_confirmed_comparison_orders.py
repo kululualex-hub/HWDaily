@@ -50,6 +50,8 @@ sheet.get_all_records.return_value = []
 assert ns['load_installation_excel_comparisons']() == []
 render = ast.unparse(next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                          and n.name == 'render_order_progress_area'))
-assert '已確認新增訂單' in render
-assert 'build_comparison_order_progress' in render
+assert 'load_order_progress_groups' in render
+progress = ast.unparse(next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                            and n.name == 'load_order_progress_groups'))
+assert '已確認新增訂單' in progress and 'build_comparison_order_progress' in progress
 print('confirmed comparison order tests passed')
