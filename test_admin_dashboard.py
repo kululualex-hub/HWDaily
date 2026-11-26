@@ -1,6 +1,10 @@
 """Check dashboard routing and counts without using production Sheets."""
 import ast
+from datetime import datetime, timezone
+import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 import pandas as pd
 
@@ -10,7 +14,7 @@ compile(source, "app.py", "exec")
 names = {"ADMIN_NAV_GROUPS", "ADMIN_PAGE_LABELS", "open_admin_page",
          "needs_installation_tracking", "render_admin_overview",
          "unrecorded_item_display_category", "render_admin_order_review",
-         "select_pending_custom_installation_cases"}
+         "select_pending_custom_installation_cases", "render_local_timetree_schedule"}
 nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
          or (isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
              and n.targets[0].id in names)]
@@ -31,6 +35,9 @@ legacy = [{"機台名稱": "A", "狀態": "未完成", "來源鍵": "OLD-1"},
           {"機台名稱": "C", "狀態": "缺料", "來源鍵": "OLD-2"}]
 comparison_ui, queue_ui = MagicMock(), MagicMock()
 ns = dict(st=ui, pd=pd, load_new_installation_records=lambda: new,
+          load_cloud_timetree_schedule=MagicMock(return_value=None),
+          Path=Path, datetime=datetime, TAIPEI_TZ=timezone.utc, json=json,
+          os=SimpleNamespace(environ={}),
           legacy_records_for_new_interface=lambda: legacy,
           CUSTOM_CASE_PENDING_SOURCE="待確認", CUSTOM_CASE_SETUP_SOURCE="待設定",
           load_unrecorded_installation_items=lambda: [
@@ -75,4 +82,52 @@ comparison_ui.assert_called_once_with()
 queue_ui.assert_called_once()
 assert queue_ui.call_args.kwargs == {"scope": "confirmation"}
 assert source.count("    render_installation_excel_version_area()") == 1
+ui.expander.reset_mock()
+with TemporaryDirectory() as tmp:
+    ns["os"].environ["LOCALAPPDATA"] = tmp
+    path = Path(tmp) / "HWDaily-TimeTree-Test" / "daily.json"
+    path.parent.mkdir()
+    render = ns["render_local_timetree_schedule"]
+    now = datetime.now(timezone.utc)
+    data = {"checkedAt": now.isoformat(), "date": now.date().isoformat(),
+            "status": "ok", "events": [{"time": "All-day", "title": "測試",
+                                        "commentsStatus": "ok", "comments": ["測試文字留言"]}]}
+    path.write_text(json.dumps(data), encoding="utf-8")
+    render()
+    ui.container.assert_called_once_with(border=True)
+    assert [call.args for call in ui.text.call_args_list] == [
+        ("工程｜測試",), ("測試文字留言",),
+    ]
+    ui.dataframe.assert_not_called()
+    ui.expander.assert_called_once_with("查看留言（1 則）", expanded=False)
+    ui.expander.reset_mock()
+    unavailable = {**data["events"][0], "commentsStatus": "unavailable", "comments": []}
+    path.write_text(json.dumps({**data, "events": [unavailable]}), encoding="utf-8")
+    render()
+    ui.caption.assert_called_with("留言尚未同步或無法讀取。")
+    ui.expander.assert_not_called()
+    ui.dataframe.reset_mock()
+    path.write_text(json.dumps({**data, "date": "2000-01-01"}), encoding="utf-8")
+    render()
+    ui.warning.assert_called_with("今天尚未更新，不顯示前一天的行程。")
+    path.write_text(json.dumps({**data, "status": "login_required"}), encoding="utf-8")
+    render()
+    ui.warning.assert_called_with("TimeTree 登入已失效，請在專用瀏覽器重新登入。")
+    ui.dataframe.assert_not_called()
+del ns["os"].environ["LOCALAPPDATA"]
+cloud = ns["load_cloud_timetree_schedule"]
+cloud.reset_mock()
+cloud.return_value = data
+ui.text.reset_mock()
+state["user_role"] = "工程師"
+render()
+cloud.assert_not_called()
+ui.text.assert_not_called()
+state["user_role"] = "管理者"
+render()
+cloud.assert_called_once_with()
+assert [call.args for call in ui.text.call_args_list] == [("工程｜測試",), ("測試文字留言",)]
+cloud.side_effect = RuntimeError("private detail")
+render()
+ui.warning.assert_called_with("無法讀取 TimeTree 行程快照，請稍後再試。")
 print("admin dashboard navigation and count tests passed")

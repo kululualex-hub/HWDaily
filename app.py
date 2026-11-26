@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 import gspread
 import pandas as pd
 from datetime import date, datetime, timedelta, timezone
@@ -8821,8 +8822,91 @@ def needs_installation_tracking(record):
             and bool(str(record.get("機台名稱", "")).strip()))
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_cloud_timetree_schedule():
+    """Read only the dedicated snapshot; never read other Drive workbooks."""
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly",
+              "https://www.googleapis.com/auth/drive.readonly"]
+    client = (gspread.service_account_from_dict(dict(st.secrets["gcp_service_account"]), scopes=scopes)
+              if "gcp_service_account" in st.secrets
+              else gspread.service_account(filename="credentials.json", scopes=scopes))
+    client.set_timeout((5, 8))
+    title = "HWDaily TimeTree 私人行程快照 v1"
+    files = [item for item in client.list_spreadsheet_files(title=title) if item["name"] == title]
+    if not files:
+        return None
+    if len(files) != 1:
+        raise ValueError("ambiguous TimeTree snapshot")
+    book = client.open_by_key(files[0]["id"])
+    perms = book.list_permissions()
+    email = client.http_client.auth.service_account_email
+    if (len(perms) != 2 or any(p.get("type") != "user" for p in perms)
+            or sum(p.get("role") == "owner" for p in perms) != 1
+            or not any(p.get("role") == "writer" and p.get("emailAddress", "").casefold() == email.casefold()
+                       for p in perms)):
+        raise ValueError("unexpected TimeTree sharing")
+    rows = book.worksheet("快照").get("A1:D2", value_render_option="UNFORMATTED_VALUE")
+    if not rows or rows[0] != ["日期", "更新時間", "同步狀態", "行程資料"]:
+        raise ValueError("unexpected TimeTree schema")
+    if len(rows) == 1:
+        return {}
+    day, checked_at, status, body = rows[1]
+    return {"date": day, "checkedAt": checked_at, "status": status, "events": json.loads(body)}
+
+
+def render_local_timetree_schedule():
+    if st.session_state.get("user_role") != "管理者":
+        return
+    local_dir = os.environ.get("LOCALAPPDATA")
+    snapshot = Path(local_dir) / "HWDaily-TimeTree-Test" / "daily.json" if local_dir else None
+    is_local = snapshot is not None and snapshot.is_file()
+    try:
+        result = (json.loads(snapshot.read_text(encoding="utf-8")) if is_local
+                  else load_cloud_timetree_schedule())
+    except Exception:
+        st.subheader("今日裝機行程")
+        st.warning("無法讀取 TimeTree 行程快照，請稍後再試。")
+        return
+    if result is None:
+        st.subheader("今日裝機行程")
+        st.warning("尚未連線至私人 TimeTree 行程快照。")
+        return
+    st.subheader("今日裝機行程（本機試跑）" if is_local else "今日裝機行程")
+    if not result:
+        st.info("今天尚未收到 TimeTree 同步資料。")
+        return
+    try:
+        checked_at = datetime.fromisoformat(result["checkedAt"]).astimezone(TAIPEI_TZ)
+        st.caption(f"最後嘗試：{checked_at:%Y/%m/%d %H:%M}（台灣時間）")
+        today = datetime.now(TAIPEI_TZ).date()
+        if result["date"] != today.isoformat() or checked_at.date() != today:
+            st.warning("今天尚未更新，不顯示前一天的行程。")
+        elif result["status"] == "login_required":
+            st.warning("TimeTree 登入已失效，請在專用瀏覽器重新登入。")
+        elif result["status"] != "ok":
+            st.warning("TimeTree 更新失敗，無法確認今天的行程。")
+        elif result["events"]:
+            for item in result["events"]:
+                with st.container(border=True):
+                    st.text(f"工程｜{item['title']}")
+                    if item.get("commentsStatus") != "ok":
+                        st.caption("留言尚未同步或無法讀取。")
+                    elif not item.get("comments"):
+                        st.caption("沒有可顯示的文字留言。")
+                    else:
+                        comments = item["comments"]
+                        with st.expander(f"查看留言（{len(comments)} 則）", expanded=False):
+                            for comment in comments:
+                                st.text(comment)
+        else:
+            st.info("今天沒有行程。")
+    except (OSError, ValueError, TypeError, KeyError):
+        st.warning("無法讀取 TimeTree 行程快照。")
+
+
 def render_admin_overview():
     st.header("管理總覽")
+    render_local_timetree_schedule()
     st.caption("先處理待辦，再前往各作業頁；總覽不直接修改資料。")
     tracking = review = custom_cases = "—"
     try:
