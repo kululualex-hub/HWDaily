@@ -14,7 +14,8 @@ compile(source, "app.py", "exec")
 names = {"ADMIN_NAV_GROUPS", "ADMIN_PAGE_LABELS", "open_admin_page",
          "needs_installation_tracking", "render_admin_overview",
          "unrecorded_item_display_category", "render_admin_order_review",
-         "select_pending_custom_installation_cases", "render_local_timetree_schedule"}
+         "select_pending_custom_installation_cases", "render_local_timetree_schedule",
+         "render_morning_page"}
 nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
          or (isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
              and n.targets[0].id in names)]
@@ -22,6 +23,12 @@ nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in n
 
 class State(dict):
     __setattr__ = dict.__setitem__
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name) from None
 
 
 ui = MagicMock()
@@ -130,4 +137,48 @@ assert [call.args for call in ui.text.call_args_list] == [("工程｜測試",), 
 cloud.side_effect = RuntimeError("private detail")
 render()
 ui.warning.assert_called_with("無法讀取 TimeTree 行程快照，請稍後再試。")
+
+# Morning agenda is shown after search; only admins and guest sessions may read it.
+cloud.side_effect = None
+cloud.return_value = data
+ui.button.return_value = False
+state["tab1_search_active"] = False
+morning = ns["render_morning_page"]
+for role in ("工程師", "業務", "公用"):
+    state["user_role"] = role
+    ui.reset_mock()
+    cloud.reset_mock()
+    morning()
+    cloud.assert_not_called()
+    ui.text.assert_not_called()
+    ui.subheader.assert_called_once_with("查詢晨會動態")
+state["user_role"] = "管理者"
+ui.reset_mock()
+morning()
+cloud.assert_called_once_with()
+assert [call.args for call in ui.subheader.call_args_list] == [
+    ("查詢晨會動態",), ("今日裝機行程",),
+]
+ui.expander.assert_called_once_with("查看留言（1 則）", expanded=False)
+state["tab1_search_active"] = True
+state["tab1_filtered_df"] = pd.DataFrame()
+ui.reset_mock()
+morning()
+calls = [(call[0], call.args) for call in ui.method_calls]
+assert calls.index(("info", ("📅 該日尚無裝機紀錄。",))) < calls.index(
+    ("subheader", ("今日裝機行程",))
+)
+state.update(user_role="公用", user_id="guest", account_guest_session=True, logged_in=True)
+cloud.reset_mock()
+ui.reset_mock()
+render()
+cloud.assert_not_called()
+morning()
+cloud.assert_called_once_with()
+ui.text.assert_called_once_with("工程｜測試")
+ui.expander.assert_not_called()
+state["logged_in"] = False
+cloud.reset_mock()
+morning()
+cloud.assert_not_called()
 print("admin dashboard navigation and count tests passed")

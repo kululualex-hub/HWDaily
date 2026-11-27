@@ -8854,8 +8854,12 @@ def load_cloud_timetree_schedule():
     return {"date": day, "checkedAt": checked_at, "status": status, "events": json.loads(body)}
 
 
-def render_local_timetree_schedule():
-    if st.session_state.get("user_role") != "管理者":
+def render_local_timetree_schedule(*, allow_guest=False):
+    session = st.session_state
+    is_admin = session.get("user_role") == "管理者"
+    is_guest = (allow_guest and session.get("logged_in") and session.get("user_id") == "guest"
+                and session.get("account_guest_session") and session.get("user_role") == "公用")
+    if not (is_admin or is_guest):
         return
     local_dir = os.environ.get("LOCALAPPDATA")
     snapshot = Path(local_dir) / "HWDaily-TimeTree-Test" / "daily.json" if local_dir else None
@@ -8882,13 +8886,16 @@ def render_local_timetree_schedule():
         if result["date"] != today.isoformat() or checked_at.date() != today:
             st.warning("今天尚未更新，不顯示前一天的行程。")
         elif result["status"] == "login_required":
-            st.warning("TimeTree 登入已失效，請在專用瀏覽器重新登入。")
+            st.warning("TimeTree 登入已失效，請在專用瀏覽器重新登入。" if is_admin
+                       else "今日行程尚未更新，請聯絡管理者。")
         elif result["status"] != "ok":
             st.warning("TimeTree 更新失敗，無法確認今天的行程。")
         elif result["events"]:
             for item in result["events"]:
                 with st.container(border=True):
                     st.text(f"工程｜{item['title']}")
+                    if not is_admin:
+                        continue
                     if item.get("commentsStatus") != "ok":
                         st.caption("留言尚未同步或無法讀取。")
                     elif not item.get("comments"):
@@ -9139,6 +9146,8 @@ def render_morning_page():
                 show_details_dialog(filtered_df.iloc[selected_idx], 'tab1_grid_key')
         else:
             st.info(f"📅 該日尚無裝機紀錄。")
+
+    render_local_timetree_schedule(allow_guest=True)
 
 if tab1 is not None:
     with tab1:
