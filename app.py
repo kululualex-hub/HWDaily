@@ -8894,8 +8894,6 @@ def render_local_timetree_schedule(*, allow_guest=False):
             for item in result["events"]:
                 with st.container(border=True):
                     st.text(f"工程｜{item['title']}")
-                    if not is_admin:
-                        continue
                     if item.get("commentsStatus") != "ok":
                         st.caption("留言尚未同步或無法讀取。")
                     elif not item.get("comments"):
